@@ -134,8 +134,10 @@ class VideoWorkbenchApp:
         self.mode_var = tk.StringVar(value=MODE_LOCAL_FILE)
         self.video_var = tk.StringVar()
         self.image_var = tk.StringVar()
-        self.lrc_var = tk.StringVar()                  
-        self.vinyl_mode_var = tk.BooleanVar(value=True) 
+        self.lrc_var = tk.StringVar()
+        self.bilingual_var = tk.BooleanVar(value=False)
+        self.zh_lrc_var = tk.StringVar()
+        self.vinyl_mode_var = tk.BooleanVar(value=True)
         self.audio_var = tk.StringVar()
         self.video_out_var = tk.StringVar()
         self.batch_output_var = tk.StringVar()
@@ -307,6 +309,22 @@ class VideoWorkbenchApp:
             style="Body.TLabel",
         ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(0, 2))
 
+        # 双语字幕（主英附中）：勾选后显示中文翻译文件选择行
+        ttk.Checkbutton(
+            input_box,
+            text="双语字幕（当前行英文下方附中文译文，上/下一行仅英文）",
+            variable=self.bilingual_var,
+            style="Body.TLabel",
+            command=self._toggle_bilingual_ui,
+        ).grid(row=4, column=0, columnspan=3, sticky="w", pady=(0, 2))
+
+        self.zh_lrc_label = ttk.Label(input_box, text="中文翻译文件（与英文逐行对应，可选）", style="Body.TLabel")
+        self.zh_lrc_entry = ttk.Entry(input_box, textvariable=self.zh_lrc_var)
+        self.zh_lrc_button = ttk.Button(input_box, text="选择中文", style="Secondary.TButton", command=self.browse_zh_lrc)
+        self.zh_lrc_label.grid(row=5, column=0, sticky="w", pady=(0, 6))
+        self.zh_lrc_entry.grid(row=5, column=1, sticky="ew", padx=8, pady=(0, 6))
+        self.zh_lrc_button.grid(row=5, column=2, sticky="ew", pady=(0, 6))
+
         # 第 3 步（独立设置音视频范围）
         clip_box = ttk.LabelFrame(parent, text="第 3 步：设置处理范围（音频与视频独立控制）", style="Section.TLabelframe", padding=14)
         clip_box.grid(row=3, column=0, sticky="ew", pady=(0, 10))
@@ -462,6 +480,25 @@ class VideoWorkbenchApp:
             self.lrc_var.set(path)
             self.set_status(f"已装载歌词：{os.path.basename(path)}")
             self.append_log(f"已装载同步歌词文件：{path}")
+
+    def _toggle_bilingual_ui(self):
+        show = self.bilingual_var.get()
+        for widget in (self.zh_lrc_label, self.zh_lrc_entry, self.zh_lrc_button):
+            if show:
+                widget.grid()
+            else:
+                widget.grid_remove()
+
+    def browse_zh_lrc(self):
+        path = filedialog.askopenfilename(parent=self.root, filetypes=[
+            ("中文翻译文件", "*.plain *.txt *.lrc *.srt *.vtt"),
+            ("纯文本翻译", "*.plain"), ("文本翻译", "*.txt"),
+            ("LRC 翻译", "*.lrc"), ("SRT 翻译", "*.srt"), ("VTT 翻译", "*.vtt"),
+            ("所有文件", "*.*")])
+        if path:
+            self.zh_lrc_var.set(path)
+            self.set_status(f"已装载中文翻译：{os.path.basename(path)}")
+            self.append_log(f"已装载中文翻译文件：{path}")
 
     def browse_audio_output(self):
         path = filedialog.asksaveasfilename(parent=self.root, defaultextension=".mp3", filetypes=[("MP3", "*.mp3"), ("M4A", "*.m4a"), ("所有文件", "*.*")])
@@ -707,6 +744,7 @@ class VideoWorkbenchApp:
                 video_end_time=self.video_end_var.get().strip(),
                 card_theme=self.card_theme_var.get(),
                 fix_lyric_overlap=self.fix_overlap_var.get(),
+                zh_lyrics_path=self.zh_lrc_var.get().strip() if self.bilingual_var.get() else "",
             )
 
             output_anchor = result.video_output or result.audio_output or self.audio_var.get().strip()
@@ -740,6 +778,7 @@ class VideoWorkbenchApp:
                     video_end_time=self.video_end_var.get().strip(),
                     card_theme=self.card_theme_var.get(),
                     fix_lyric_overlap=self.fix_overlap_var.get(),
+                    zh_lyrics_path=self.zh_lrc_var.get().strip() if self.bilingual_var.get() else "",
                 )
                 if result.success:
                     success_count += 1
@@ -795,6 +834,9 @@ class VideoWorkbenchApp:
         self.card_theme_var.set(data.get("card_theme", DEFAULT_CARD_THEME))
         self.theme_combo.set(card_render.THEME_LABELS.get(self.card_theme_var.get(), "极简高级"))
         self.fix_overlap_var.set(data.get("fix_overlap", True))
+        self.bilingual_var.set(data.get("bilingual", False))
+        self.zh_lrc_var.set(data.get("zh_lrc", ""))
+        self._toggle_bilingual_ui()
 
     def save_settings(self):
         data = {
@@ -813,6 +855,8 @@ class VideoWorkbenchApp:
             "auto_open": self.auto_open_var.get(),
             "card_theme": self.card_theme_var.get(),
             "fix_overlap": self.fix_overlap_var.get(),
+            "bilingual": self.bilingual_var.get(),
+            "zh_lrc": self.zh_lrc_var.get().strip(),
         }
         try:
             with open(SETTINGS_FILE, "w", encoding="utf-8") as handle:

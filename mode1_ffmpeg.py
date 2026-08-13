@@ -187,12 +187,14 @@ def mode1_process(
     video_end_time="End",
     card_theme=DEFAULT_CARD_THEME,
     fix_lyric_overlap=True,
+    zh_lyrics_path="",
 ):
     video_path = video_path.strip()
     image_path = image_path.strip()
     audio_out = audio_out.strip()
     video_out = video_out.strip()
     lrc_path = lrc_path.strip()
+    zh_lyrics_path = (zh_lyrics_path or "").strip()
     video_start_time = video_start_time.strip()
     video_end_time = video_end_time.strip()
     if card_theme not in card_render.THEMES:
@@ -253,8 +255,15 @@ def mode1_process(
                             _emit(logger, "检测到同目录同名纯歌词(.plain)：以纯歌词文本和行为准，借用 SRT 时间轴对齐。")
                     if fix_lyric_overlap:
                         _emit(logger, "已启用：消除歌词时间重叠（相邻行自动截断）。")
+                    if zh_lyrics_path:
+                        if os.path.isfile(zh_lyrics_path):
+                            _emit(logger, f"已启用双语字幕（主英附中）：中文翻译文件 {zh_lyrics_path}")
+                        else:
+                            _emit(logger, "双语字幕已勾选但中文翻译文件不存在，将忽略中文。")
+                            zh_lyrics_path = ""
                     temp_lyrics_ass = card_render.convert_lrc_to_ass(
-                        lrc_path, card_theme, fix_overlap=fix_lyric_overlap)
+                        lrc_path, card_theme, fix_overlap=fix_lyric_overlap,
+                        zh_path=zh_lyrics_path or None)
                     if temp_lyrics_ass:
                         _emit(logger, "歌词解析并转换为 ASS 高亮字幕成功。")
                     else:

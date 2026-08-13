@@ -103,6 +103,19 @@ THEMES = {
 THEME_LABELS = {key: cfg["label"] for key, cfg in THEMES.items()}
 
 
+# ==================== 双语歌词布局 ====================
+
+# 开启双语（主英附中）时，当前行要在英文下方额外叠一行中文译文：
+# 三行位置整体比单语上移、行距拉开，字号收紧，避免两行高的当前行与上/下一行重叠。
+BILINGUAL_LAYOUT = {
+    "minimal": {"lyrics_y": (886, 970, 1050), "lyrics_size": 48, "zh_size": 32},
+    "player":  {"lyrics_y": (858, 945, 1028), "lyrics_size": 48, "zh_size": 32},
+    "glass":   {"lyrics_y": (882, 959, 1036), "lyrics_size": 46, "zh_size": 30},
+}
+# 中文译文颜色：88% 白（弱于英文纯白主歌词，形成主次层次）
+BILINGUAL_ZH_COLOR = "&HE0FFFFFF&"
+
+
 # ==================== 基础工具 ====================
 
 def _font(bold: bool, size: int) -> ImageFont.FreeTypeFont:
@@ -675,6 +688,28 @@ def _parse_lyrics(path: str, fix_overlap: bool = True) -> list:
     return lines
 
 
+def _parse_zh_lines(zh_path: str) -> list:
+    """解析中文翻译文件，返回纯文本行列表（按行号与英文行 1:1 配对）。
+
+    支持 plain/txt/lrc/srt/vtt；带时间轴的格式只取其文本部分，不关心其自身时间轴。
+    双语对齐由英文行的时间轴决定，中文文件只提供译文文本，因此两份文件的行数应一致
+    （多余/缺失的行忽略）。
+    """
+    if not zh_path:
+        return []
+    content = _read_text(zh_path)
+    if not content:
+        return []
+    ext = os.path.splitext(zh_path)[1].lower()
+    if ext == ".srt":
+        return [text for _, _, text in _parse_srt(content)]
+    if ext == ".vtt":
+        return [text for _, _, text in _parse_vtt(content)]
+    if ext == ".lrc":
+        return [text for _, _, text in _parse_lrc(content)]
+    return [text for _, _, text in _parse_plain(content)]
+
+
 def _fmt_ass(ms: int) -> str:
     h, ms = divmod(ms, 3600000)
     m, ms = divmod(ms, 60000)
@@ -687,7 +722,8 @@ def _ass_escape(text: str) -> str:
     return text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
 
 
-def convert_lrc_to_ass(lrc_path: str, theme_key: str, fix_overlap: bool = True) -> str:
+def convert_lrc_to_ass(lrc_path: str, theme_key: str, fix_overlap: bool = True,
+                       zh_path: str = None) -> str:
     """歌词(LRC/SRT/VTT/plain) -> ASS（Spotify 配色逻辑）。
 
     同一时刻展示三行：上一行 / 当前行 / 下一行。
@@ -696,17 +732,32 @@ def convert_lrc_to_ass(lrc_path: str, theme_key: str, fix_overlap: bool = True) 
     plain 纯歌词自动匹配同目录同名 SRT 时间轴。
     fix_overlap=True 时裁剪每行结尾不晚于下一行起点，避免两行歌词同时高亮重叠。
     各主题仅在字号上略有差异，配色逻辑统一，与 Spotify 歌词一致。
+
+    zh_path：可选的中文翻译文件（plain/txt/lrc/srt/vtt）。传入后开启「主英附中」双语：
+    当前行在英文下方叠加一行较小的中文译文（88% 白），上一行/下一行仍只显示英文灰暗行。
+    中文按行号与英文行 1:1 配对，双语对齐完全由英文行时间轴决定。
+    双语模式下三行位置错开、字号收紧（BILINGUAL_LAYOUT），给中文译文留出空间。
     """
     cfg = THEMES[theme_key]
     lines = _parse_lyrics(lrc_path, fix_overlap=fix_overlap)
     if not lines:
         return ""
 
-    active_size = cfg.get("lyrics_size", 54)
+    # 中文翻译按行号配对；只要中文文件有内容即进入双语模式
+    zh_lines = _parse_zh_lines(zh_path) if zh_path else []
+    bilingual = bool(zh_lines)
+
+    if bilingual:
+        bcfg = BILINGUAL_LAYOUT.get(theme_key, BILINGUAL_LAYOUT["minimal"])
+        active_size = bcfg["lyrics_size"]
+        zh_size = bcfg["zh_size"]
+        prev_y, active_y, next_y = bcfg["lyrics_y"]
+    else:
+        active_size = cfg.get("lyrics_size", 54)
+        prev_y, active_y, next_y = cfg.get("lyrics_y", (868, 950, 1032))
     dim_size = max(active_size - 14, 28)
     tracking = cfg.get("lyrics_tracking", 2)
     cx = CANVAS_W // 2
-    prev_y, active_y, next_y = cfg.get("lyrics_y", (868, 950, 1032))
 
     style_active = (f"Active,Microsoft YaHei,{active_size},&H00FFFFFF,&H00FFFFFF,"
                     f"&H0C0C0C,&H64000000,1,0,0,0,100,100,{tracking},"
@@ -738,10 +789,16 @@ def convert_lrc_to_ass(lrc_path: str, theme_key: str, fix_overlap: bool = True) 
         ms, end_ms, text = lines[i]
         start_t, end_t = _fmt_ass(ms), _fmt_ass(end_ms)
         safe = _ass_escape(text)
+        # 双语「主英附中」：当前行英文下方叠一行较小的中文译文（两行块整体居中）
+        if bilingual and i < len(zh_lines) and zh_lines[i]:
+            zh = _ass_escape(zh_lines[i])
+            active_text = f"{safe}\\N{{\\fs{zh_size}\\c{BILINGUAL_ZH_COLOR}}}{zh}"
+        else:
+            active_text = safe
         # 当前行：纯白高亮
         events.append(
             f"Dialogue: 0,{start_t},{end_t},Active,,0,0,0,,"
-            f"{{\\an5\\pos({cx},{active_y})\\fad(280,260)}}{safe}")
+            f"{{\\an5\\pos({cx},{active_y})\\fad(280,260)}}{active_text}")
         # 上一行：灰暗
         if i > 0:
             prev = _ass_escape(lines[i - 1][2])
