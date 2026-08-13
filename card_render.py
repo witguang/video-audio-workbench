@@ -310,20 +310,48 @@ def _render_glass(canvas, draw, cover, title, artist, cfg):
                       cfg["artist"]["color"], tracking=1, anchor_x="l")
 
 
-# ==================== LRC -> ASS（L2 高亮歌词） ====================
+# ==================== 歌词(LRC/SRT/VTT) -> ASS（Spotify 配色） ====================
 
-def _parse_lrc(lrc_path: str) -> list:
-    pattern = re.compile(r"\[(\d+):(\d+)(?:\.(\d+))?\](.*)")
+def _read_text(path: str) -> str:
+    """读取文本，优先 UTF-8，回退 GBK。"""
     try:
-        with open(lrc_path, "r", encoding="utf-8") as f:
-            content = f.read()
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
     except UnicodeDecodeError:
         try:
-            with open(lrc_path, "r", encoding="gbk") as f:
-                content = f.read()
+            with open(path, "r", encoding="gbk") as f:
+                return f.read()
         except Exception:
-            return []
+            return ""
+    except Exception:
+        return ""
 
+
+def _clean_cue_text(text: str) -> str:
+    """清理字幕文本：去掉 HTML 标签、换行标记，规整空白。"""
+    text = re.sub(r"<[^>]+>", "", text)
+    text = text.replace("\\N", " ").replace("\\n", " ")
+    return " ".join(text.split())
+
+
+def _to_ms(ts: str) -> int:
+    """时间戳(支持 H:MM:SS.mmm / MM:SS.mmm，逗号或点号作毫秒分隔) -> 毫秒。"""
+    ts = ts.replace(",", ".")
+    parts = ts.split(":")
+    sec_ms = parts[-1].split(".")
+    total = int(sec_ms[0]) * 1000
+    if len(sec_ms) > 1:
+        total += int(sec_ms[1].ljust(3, "0")[:3])
+    if len(parts) >= 3:
+        total += int(parts[-3]) * 3600000 + int(parts[-2]) * 60000
+    elif len(parts) == 2:
+        total += int(parts[-2]) * 60000
+    return total
+
+
+def _parse_lrc(content: str) -> list:
+    """LRC：同一行带一个时间点，结尾取下一行起点（无下一行则 +4s）。"""
+    pattern = re.compile(r"\[(\d+):(\d+)(?:\.(\d+))?\](.*)")
     lines = []
     for line in content.splitlines():
         m = pattern.match(line.strip())
@@ -336,7 +364,78 @@ def _parse_lrc(lrc_path: str) -> list:
         if text:
             lines.append((minutes * 60000 + seconds * 1000 + ms_val, text))
     lines.sort()
-    return lines
+    return [(ms, lines[i + 1][0] if i + 1 < len(lines) else ms + 4000, text)
+            for i, (ms, text) in enumerate(lines)]
+
+
+def _parse_srt(content: str) -> list:
+    """SRT：序号 + 起止时间轴 + 多行文本（可用显式结束时间）。"""
+    cues = []
+    for block in re.split(r"\r?\n\r?\n+", content.strip()):
+        lines = [l.strip() for l in block.splitlines() if l.strip()]
+        if not lines:
+            continue
+        if re.match(r"^\d+$", lines[0]):  # 可选序号行
+            lines = lines[1:]
+        if not lines:
+            continue
+        m = re.match(
+            r"(\d{1,2}:\d{2}:\d{2}[,.]\d{1,3})\s*-->\s*(\d{1,2}:\d{2}:\d{2}[,.]\d{1,3})",
+            lines[0])
+        if not m:
+            continue
+        text = _clean_cue_text(" ".join(lines[1:]))
+        if text:
+            cues.append((_to_ms(m.group(1)), _to_ms(m.group(2)), text))
+    cues.sort()
+    return cues
+
+
+def _parse_vtt(content: str) -> list:
+    """VTT：WEBVTT 头，跳过 STYLE/REGION/NOTE 块，时间行后跟多行文本。"""
+    content = content.splitlines()
+    cues = []
+    i = 0
+    while i < len(content):
+        line = content[i].strip()
+        if not line:
+            i += 1
+            continue
+        low = line.lower()
+        if low.startswith("webvtt") or low.startswith(("style", "region", "note")):
+            while i < len(content) and content[i].strip():
+                i += 1
+            continue
+        m = re.match(
+            r"(\d{1,2}:\d{2}(?::\d{2})?[.,]\d{1,3})\s*-->\s*"
+            r"(\d{1,2}:\d{2}(?::\d{2})?[.,]\d{1,3})", line)
+        if not m:
+            i += 1
+            continue
+        start, end = _to_ms(m.group(1)), _to_ms(m.group(2))
+        i += 1
+        text_lines = []
+        while i < len(content) and content[i].strip():
+            text_lines.append(content[i].strip())
+            i += 1
+        text = _clean_cue_text(" ".join(text_lines))
+        if text:
+            cues.append((start, end, text))
+    cues.sort()
+    return cues
+
+
+def _parse_lyrics(path: str) -> list:
+    """按扩展名分发解析，统一返回 [(start_ms, end_ms, text), ...]。"""
+    content = _read_text(path)
+    if not content:
+        return []
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".vtt":
+        return _parse_vtt(content)
+    if ext == ".srt":
+        return _parse_srt(content)
+    return _parse_lrc(content)
 
 
 def _fmt_ass(ms: int) -> str:
@@ -352,14 +451,15 @@ def _ass_escape(text: str) -> str:
 
 
 def convert_lrc_to_ass(lrc_path: str, theme_key: str) -> str:
-    """LRC -> ASS（Spotify 配色逻辑）。
+    """歌词(LRC/SRT/VTT) -> ASS（Spotify 配色逻辑）。
 
     同一时刻展示三行：上一行 / 当前行 / 下一行。
     当前行纯白高亮并略放大，上一行与下一行 45% 半透明白（灰感），带淡入淡出。
+    SRT/VTT 用字幕自带的起止时间轴，LRC 用「下一句起点」推断结尾。
     各主题仅在字号上略有差异，配色逻辑统一，与 Spotify 歌词一致。
     """
     cfg = THEMES[theme_key]
-    lines = _parse_lrc(lrc_path)
+    lines = _parse_lyrics(lrc_path)
     if not lines:
         return ""
 
@@ -396,8 +496,7 @@ def convert_lrc_to_ass(lrc_path: str, theme_key: str) -> str:
     events = []
     n = len(lines)
     for i in range(n):
-        ms, text = lines[i]
-        end_ms = lines[i + 1][0] if i + 1 < n else ms + 4000
+        ms, end_ms, text = lines[i]
         start_t, end_t = _fmt_ass(ms), _fmt_ass(end_ms)
         safe = _ass_escape(text)
         # 当前行：纯白高亮
@@ -406,13 +505,13 @@ def convert_lrc_to_ass(lrc_path: str, theme_key: str) -> str:
             f"{{\\an5\\pos({cx},{active_y})\\fad(280,260)}}{safe}")
         # 上一行：灰暗
         if i > 0:
-            prev = _ass_escape(lines[i - 1][1])
+            prev = _ass_escape(lines[i - 1][2])
             events.append(
                 f"Dialogue: 0,{start_t},{end_t},Dim,,0,0,0,,"
                 f"{{\\an5\\pos({cx},{prev_y})\\fad(380,360)}}{prev}")
         # 下一行：灰暗
         if i + 1 < n:
-            nxt = _ass_escape(lines[i + 1][1])
+            nxt = _ass_escape(lines[i + 1][2])
             events.append(
                 f"Dialogue: 0,{start_t},{end_t},Dim,,0,0,0,,"
                 f"{{\\an5\\pos({cx},{next_y})\\fad(380,360)}}{nxt}")

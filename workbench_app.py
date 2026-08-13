@@ -44,7 +44,7 @@ MODE_CONFIG = {
         "source_mode": SOURCE_LOCAL,
         "guide": [
             "1. 选择本机视频文件。",
-            "2. 选择封面图片（用于生成视频），可在此指定歌词 LRC 文件。",
+            "2. 选择封面图片（用于生成视频），可在此指定歌词文件（LRC/SRT/VTT）。",
             "3. 推荐开启极简卡片歌词模式，并独立配置音/视频裁剪范围！",
         ],
     },
@@ -296,7 +296,7 @@ class VideoWorkbenchApp:
         ttk.Entry(input_box, textvariable=self.image_var).grid(row=1, column=1, sticky="ew", padx=8, pady=(0, 6))
         ttk.Button(input_box, text="选择图片", style="Secondary.TButton", command=self.browse_image).grid(row=1, column=2, sticky="ew", pady=(0, 6))
 
-        ttk.Label(input_box, text="同步歌词 LRC（可选）", style="Body.TLabel").grid(row=2, column=0, sticky="w", pady=(0, 6))
+        ttk.Label(input_box, text="同步歌词 LRC/SRT/VTT（可选）", style="Body.TLabel").grid(row=2, column=0, sticky="w", pady=(0, 6))
         ttk.Entry(input_box, textvariable=self.lrc_var).grid(row=2, column=1, sticky="ew", padx=8, pady=(0, 6))
         ttk.Button(input_box, text="选择歌词", style="Secondary.TButton", command=self.browse_lrc).grid(row=2, column=2, sticky="ew", pady=(0, 6))
 
@@ -446,7 +446,10 @@ class VideoWorkbenchApp:
             self.append_log(f"已选择封面：{path}")
 
     def browse_lrc(self):
-        path = filedialog.askopenfilename(parent=self.root, filetypes=[("歌词文件", "*.lrc"), ("所有文件", "*.*")])
+        path = filedialog.askopenfilename(parent=self.root, filetypes=[
+            ("歌词/字幕文件", "*.lrc *.srt *.vtt"),
+            ("LRC 歌词", "*.lrc"), ("SRT 字幕", "*.srt"), ("VTT 字幕", "*.vtt"),
+            ("所有文件", "*.*")])
         if path:
             self.lrc_var.set(path)
             self.set_status(f"已装载歌词：{os.path.basename(path)}")
@@ -630,7 +633,7 @@ class VideoWorkbenchApp:
             return False
 
         if lrc and not os.path.isfile(lrc):
-            messagebox.showerror("错误", "指定的歌词 LRC 文件不存在，请重新选择。")
+            messagebox.showerror("错误", "指定的歌词/字幕文件不存在，请重新选择。")
             return False
 
         if mode == MODE_LOCAL_FILE and not os.path.isfile(source):

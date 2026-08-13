@@ -240,9 +240,9 @@ def mode1_process(
                 if not run_ffmpeg(full_audio_cmd, log=logger):
                     return ProcessResult(False, "完整音频提取失败。")
 
-                # B. LRC -> ASS（当前行高亮、上一行压暗、淡入淡出）
+                # B. 歌词(LRC/SRT/VTT) -> ASS（当前行高亮、上一行压暗、淡入淡出）
                 if lrc_path and os.path.exists(lrc_path):
-                    _emit(logger, f"正在解析 LRC 歌词: {lrc_path}")
+                    _emit(logger, f"正在解析歌词文件: {lrc_path}")
                     temp_lyrics_ass = card_render.convert_lrc_to_ass(lrc_path, card_theme)
                     if temp_lyrics_ass:
                         _emit(logger, "歌词解析并转换为 ASS 高亮字幕成功。")
