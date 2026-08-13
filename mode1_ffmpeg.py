@@ -1,16 +1,18 @@
 # -*- coding: utf-8 -*-
 import os
-import re
 import tempfile
 import urllib.request
 from dataclasses import dataclass
 from typing import Callable, Optional
 from urllib.parse import urlparse
 
+import card_render
 from ffmpeg_utils import run_ffmpeg
 
 SOURCE_LOCAL = "local"
 SOURCE_R2 = "r2"
+
+DEFAULT_CARD_THEME = "minimal"
 
 
 @dataclass
@@ -139,80 +141,6 @@ def _build_full_audio_command(video_path: str, audio_out: str):
     ]
 
 
-# ==================== 歌词解析处理模块 ====================
-
-def _parse_lrc(lrc_path: str) -> list:
-    """解析带有时间轴的 LRC 文件。"""
-    lines = []
-    pattern = re.compile(r"\[(\d+):(\d+)(?:\.(\d+))?\](.*)")
-    
-    try:
-        with open(lrc_path, "r", encoding="utf-8") as f:
-            content = f.read()
-    except UnicodeDecodeError:
-        try:
-            with open(lrc_path, "r", encoding="gbk") as f:
-                content = f.read()
-        except Exception:
-            return []
-            
-    for line in content.splitlines():
-        match = pattern.match(line.strip())
-        if match:
-            minutes = int(match.group(1))
-            seconds = int(match.group(2))
-            frac_str = match.group(3) or "0"
-            text = match.group(4).strip()
-            
-            if len(frac_str) == 1:
-                ms_val = int(frac_str) * 100
-            elif len(frac_str) == 2:
-                ms_val = int(frac_str) * 10
-            else:
-                ms_val = int(frac_str[:3])
-                
-            total_ms = minutes * 60000 + seconds * 1000 + ms_val
-            lines.append((total_ms, text))
-            
-    lines.sort()
-    return lines
-
-
-def _format_srt_time(ms: int) -> str:
-    h = ms // 3600000
-    ms %= 3600000
-    m = ms // 60000
-    ms %= 60000
-    s = ms // 1000
-    ms %= 1000
-    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
-
-
-def _convert_lrc_to_srt(lrc_path: str) -> str:
-    """将 LRC 文件转换为相对路径下的临时 srt 歌词。"""
-    parsed_lines = _parse_lrc(lrc_path)
-    if not parsed_lines:
-        return ""
-        
-    temp_srt_filename = "temp_lyrics.srt"
-    temp_srt_path = os.path.join(os.getcwd(), temp_srt_filename)
-    
-    with open(temp_srt_path, "w", encoding="utf-8") as f:
-        for idx, (ms, text) in enumerate(parsed_lines):
-            start_time = _format_srt_time(ms)
-            if idx + 1 < len(parsed_lines):
-                end_ms = parsed_lines[idx+1][0]
-            else:
-                end_ms = ms + 4000  # 最后一句默认展示 4 秒
-            end_time = _format_srt_time(end_ms)
-            
-            f.write(f"{idx+1}\n")
-            f.write(f"{start_time} --> {end_time}\n")
-            f.write(f"{text}\n\n")
-            
-    return temp_srt_filename
-
-
 # ==================== 图像渲染模块 ====================
 
 def _build_static_video_command(image_path: str, audio_out: str, video_out: str):
@@ -242,78 +170,6 @@ def _build_static_video_command(image_path: str, audio_out: str, video_out: str)
     ]
 
 
-def _build_vinyl_video_command(video_path: str, image_path: str, audio_out: str, video_out: str, srt_filename: str, *args, **kwargs) -> list:
-    """动态极简圆角歌词视频完整合成（不带裁剪，保持歌词原轴绝对对齐）。"""
-    # 1. 智能拆分歌名与歌手
-    base_name = os.path.splitext(os.path.basename(video_path))[0]
-    clean_name = re.sub(r"[\(\[][^\]\)]*[\)\]]", "", base_name).strip()
-    parts = [p.strip() for p in clean_name.split("-") if p.strip()]
-    
-    if len(parts) >= 2:
-        artist = parts[0]
-        title = parts[1]
-    else:
-        artist = ""
-        title = base_name
-
-    # 2. 构造文本绘制滤镜（坐标随封面缩至 300 像素进行黄金分割重排）
-    title_escaped = title.replace("'", "'\\''")
-    artist_escaped = artist.replace("'", "'\\''")
-    
-    drawtext_filters = []
-    drawtext_filters.append(
-        f"drawtext=font='Microsoft YaHei':text='{title_escaped}':fontcolor=white:fontsize=26:x=(w-text_w)/2:y=465"
-    )
-    if artist:
-        drawtext_filters.append(
-            f"drawtext=font='Microsoft YaHei':text='{artist_escaped}':fontcolor=white@0.5:fontsize=15:x=(w-text_w)/2:y=505"
-        )
-    drawtext_str = "," + ",".join(drawtext_filters)
-
-    # 3. 构造歌词字幕滤镜
-    sub_filter = ""
-    if srt_filename:
-        sub_filter = f",subtitles='{srt_filename}':force_style='Fontname=Microsoft YaHei,FontSize=20,PrimaryColour=&H00FFFFFF,Outline=1,OutlineColour=&H00000000,MarginV=45'"
-
-    # 4. 数学半径与极简抗锯齿圆角公式定义 (300x300 圆角，20px半径)
-    x_dist = "if(lt(X,20),20-X,if(gt(X,280),X-280,0))"
-    y_dist = "if(lt(Y,20),20-Y,if(gt(Y,280),Y-280,0))"
-    d = f"sqrt(({x_dist})*({x_dist})+({y_dist})*({y_dist}))"
-    mask_expr = f"if(gt({x_dist},0),if(gt({y_dist},0),if(lte({d},18),255,if(gte({d},20),0,127.5*(20-{d}))),255),255)"
-
-    # 5. 极简极清滤镜链：高斯模糊磨砂背景 + 极高清晰度圆角封面 + 底部滚动字幕
-    filter_complex = (
-        # A. 磨砂背景 (1280x720)
-        f"[1:v]scale=1280:720:force_original_aspect_ratio=increase:flags=lanczos,crop=1280:720,gblur=sigma=45,setsar=1[bg_blurred];"
-        
-        # B. 圆角封面：高画质裁剪缩放到 300x300，应用亚像素抗锯齿圆角遮罩
-        f"[1:v]crop='min(iw,ih):min(iw,ih)',scale=300:300:flags=lanczos,setsar=1[cover_raw];"
-        f"color=s=300x300:c=black:r=25,setsar=1,geq=lum='{mask_expr}':cb=128:cr=128[cover_mask];"
-        f"[cover_raw][cover_mask]alphamerge[cover_rounded];"
-        
-        # C. 全画面层级极简组装（x=490, y=120）
-        f"[bg_blurred][cover_rounded]overlay=x=490:y=120{drawtext_str}{sub_filter},setsar=1[outv]"
-    )
-
-    return [
-        "-y",
-        "-i", audio_out,     # input 0 (完整基准音频)
-        "-loop", "1", "-framerate", "25", "-i", image_path, # input 1
-        "-filter_complex", filter_complex,
-        "-map", "[outv]",
-        "-map", "0:a",
-        "-c:v", "libx264",
-        "-preset", "medium",
-        "-crf", "17",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-b:a", "192k",
-        "-aspect", "16:9",
-        "-shortest",
-        video_out
-    ]
-
-
 def mode1_process(
     video_path,
     image_path,
@@ -325,8 +181,9 @@ def mode1_process(
     logger: Optional[Callable[[str], None]] = None,
     use_vinyl_mode=False,
     lrc_path="",
-    video_start_time="00:00:00", # 【新增参数】
-    video_end_time="End",        # 【新增参数】
+    video_start_time="00:00:00",
+    video_end_time="End",
+    card_theme=DEFAULT_CARD_THEME,
 ):
     video_path = video_path.strip()
     image_path = image_path.strip()
@@ -335,9 +192,12 @@ def mode1_process(
     lrc_path = lrc_path.strip()
     video_start_time = video_start_time.strip()
     video_end_time = video_end_time.strip()
-    
+    if card_theme not in card_render.THEMES:
+        card_theme = DEFAULT_CARD_THEME
+
     temp_video_file_path = None
-    temp_srt_filename = None
+    temp_lyrics_ass = None
+    temp_card_path = None
     temp_full_audio_path = None
     temp_full_video_path = None
 
@@ -367,8 +227,9 @@ def mode1_process(
         # 2. 如果指定了图片，合成视频
         if image_path:
             if use_vinyl_mode:
-                _emit(logger, "已启用：动态极简圆角歌词卡片模式。")
-                
+                theme_label = card_render.THEMES[card_theme]["label"]
+                _emit(logger, f"已启用：卡片歌词模式（主题：{theme_label}）。")
+
                 # A. 提取完整长度音频流，作为歌词与封面的无错对齐基准
                 temp_full_audio_path = os.path.join(os.getcwd(), "temp_full_audio.aac")
                 _emit(logger, "正在提取完整长度音频流以进行字幕时间轴对齐...")
@@ -376,23 +237,27 @@ def mode1_process(
                 if not run_ffmpeg(full_audio_cmd, log=logger):
                     return ProcessResult(False, "完整音频提取失败。")
 
+                # B. LRC -> ASS（当前行高亮、上一行压暗、淡入淡出）
                 if lrc_path and os.path.exists(lrc_path):
                     _emit(logger, f"正在解析 LRC 歌词: {lrc_path}")
-                    temp_srt_filename = _convert_lrc_to_srt(lrc_path)
-                    if temp_srt_filename:
-                        _emit(logger, "歌词解析并转换成功。")
+                    temp_lyrics_ass = card_render.convert_lrc_to_ass(lrc_path, card_theme)
+                    if temp_lyrics_ass:
+                        _emit(logger, "歌词解析并转换为 ASS 高亮字幕成功。")
                     else:
                         _emit(logger, "歌词解析为空或不规范，将不渲染歌词。")
-                
-                # B. 合成整首歌长度的视频 (歌词与原歌曲完整对齐，完全不在此处做中间裁剪)
+
+                # C. 预渲染静态层（封面卡 + 排版 + 装饰）
+                _emit(logger, "正在预渲染封面卡片与排版层...")
+                temp_card_path = card_render.render_static_layer(
+                    image_path, os.path.basename(video_path), card_theme)
+
+                # D. 合成整首歌长度的视频（歌词与原歌曲完整对齐，不在此处做中间裁剪）
                 temp_full_video_path = os.path.join(os.getcwd(), "temp_full_video.mp4")
-                _emit(logger, "正在进行全时值高清晰度歌词视频合成...")
-                
-                vinyl_cmd = _build_vinyl_video_command(
-                    video_path, image_path, temp_full_audio_path, temp_full_video_path, 
-                    temp_srt_filename or ""
-                )
-                if not run_ffmpeg(vinyl_cmd, log=logger):
+                _emit(logger, "正在进行全时值高清歌词视频合成...")
+                card_cmd = card_render.build_card_command(
+                    temp_full_audio_path, image_path, temp_card_path,
+                    temp_lyrics_ass or "", card_theme, temp_full_video_path)
+                if not run_ffmpeg(card_cmd, log=logger):
                     return ProcessResult(False, "完整视频合成失败。")
                 
                 # C. 二次精细剪切成品视频，完美同步画面、音轨和滚动歌词 [1]
@@ -437,13 +302,21 @@ def mode1_process(
                 _emit(logger, f"已清理临时视频文件: {temp_video_file_path}")
             except OSError:
                 pass
-        # 自动清理相对路径下的临时 srt 歌词文件
-        if temp_srt_filename:
-            full_temp_srt = os.path.join(os.getcwd(), temp_srt_filename)
-            if os.path.exists(full_temp_srt):
+        # 自动清理临时 ASS 歌词文件
+        if temp_lyrics_ass:
+            full_temp_ass = os.path.join(os.getcwd(), temp_lyrics_ass)
+            if os.path.exists(full_temp_ass):
                 try:
-                    os.remove(full_temp_srt)
+                    os.remove(full_temp_ass)
                     _emit(logger, "已清理临时歌词文件。")
+                except OSError:
+                    pass
+        # 自动清理临时封面卡片静态层
+        if temp_card_path:
+            if os.path.exists(temp_card_path):
+                try:
+                    os.remove(temp_card_path)
+                    _emit(logger, "已清理临时封面卡片层。")
                 except OSError:
                     pass
         # 自动清理后台提取的临时基准完整音频流

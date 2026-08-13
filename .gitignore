@@ -13,3 +13,9 @@ _archive/
 
 # 临时输出
 outputs/
+preview/
+temp_*.aac
+temp_*.mp4
+temp_*.png
+temp_*.ass
+temp_*.srt

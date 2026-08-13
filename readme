@@ -11,9 +11,18 @@
 
 核心能力：
 - 背景图为空时只导出音频；有背景图时额外生成封面视频。
-- 支持 LRC 同步歌词，可选开启「极简圆角卡片歌词」动态渲染模式。
+- 支持 LRC 同步歌词，可选开启「卡片歌词模式」，内含三种可切换视觉主题：
+    · 极简高级 —— 封面居中为主角，暗渐变背景，粗体排版，金色点缀
+    · 播放器分栏 —— 左侧大封面 + 右侧 Now Playing 排版，播放器风
+    · 玻璃拟态 —— 整块磨砂玻璃面板 + 冰蓝高光，通透现代
+  歌词为 ASS 高亮渲染：当前行高亮放大、上一行压暗、淡入淡出。
 - 音频提取范围与视频裁剪范围可独立设置（视频会二次精准切片，防止歌词错位）。
 - 批量模式下会自动规避同一轮任务中的重名输出。
+
+卡片主题说明：
+- 主题在界面底部「卡片风格」下拉框选择，选择结果会存入 app_settings.json。
+- 渲染在 1920x1080 内部画布完成，输出更清晰。
+- 卡片模式依赖 Pillow（见 requirements.txt）。
 
 运行方式：
   python workbench_app.py
@@ -23,7 +32,7 @@
   pyinstaller -F -w --add-binary "ffmpeg/ffmpeg.exe;ffmpeg" workbench_app.py
 
 说明：
-- 项目不依赖任何第三方 Python 库（全部使用标准库 + 内置 ffmpeg/ffmpeg.exe）。
-- create_shortcut.py 仅在需要修复 logo.ico 图标格式时才会用到 Pillow（可选安装）。
+- 卡片歌词模式依赖 Pillow；普通静态视频模式不依赖（标准库 + 内置 ffmpeg/ffmpeg.exe）。
+- create_shortcut.py 仅在需要修复 logo.ico 图标格式时用到 Pillow。
 - 配置保存在 app_settings.json（个人本机路径，不入库）。
 - 历史版本的 main_gui.py、update_project.py、mode1_ffmpeg copy.py 已归档至 _archive/。

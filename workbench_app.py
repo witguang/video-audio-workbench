@@ -10,7 +10,8 @@ from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 from urllib.parse import urlparse
 
-from mode1_ffmpeg import SOURCE_LOCAL, SOURCE_R2, mode1_process
+import card_render
+from mode1_ffmpeg import SOURCE_LOCAL, SOURCE_R2, DEFAULT_CARD_THEME, mode1_process
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 SETTINGS_FILE = os.path.join(APP_DIR, "app_settings.json")
@@ -148,6 +149,7 @@ class VideoWorkbenchApp:
         self.video_end_var = tk.StringVar(value="End")
 
         self.auto_open_var = tk.BooleanVar(value=True)
+        self.card_theme_var = tk.StringVar(value=DEFAULT_CARD_THEME)
         self.status_var = tk.StringVar()
         self.summary_var = tk.StringVar()
         self.guide_var = tk.StringVar()
@@ -235,7 +237,16 @@ class VideoWorkbenchApp:
         mode_select_frame = ttk.Frame(action_bar, style="Card.TFrame")
         mode_select_frame.grid(row=0, column=0, sticky="w")
         ttk.Checkbutton(mode_select_frame, text="完成后自动打开输出目录", variable=self.auto_open_var).grid(row=0, column=0, sticky="w", pady=(0, 4))
-        ttk.Checkbutton(mode_select_frame, text="开启极简圆角卡片歌词模式", variable=self.vinyl_mode_var).grid(row=1, column=0, sticky="w")
+        ttk.Checkbutton(mode_select_frame, text="开启卡片歌词模式", variable=self.vinyl_mode_var).grid(row=1, column=0, sticky="w")
+
+        theme_row = ttk.Frame(mode_select_frame, style="Card.TFrame")
+        theme_row.grid(row=2, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(theme_row, text="卡片风格:", style="Body.TLabel").grid(row=0, column=0, sticky="w")
+        self.theme_combo = ttk.Combobox(theme_row, state="readonly", width=10)
+        self.theme_combo.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        self.theme_combo["values"] = [card_render.THEME_LABELS[k] for k in card_render.THEMES]
+        self.theme_combo.set(card_render.THEME_LABELS.get(DEFAULT_CARD_THEME, "极简高级"))
+        self.theme_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_theme_selected())
 
         ttk.Button(action_bar, text="重新智能生成输出路径", style="Secondary.TButton", command=lambda: self.smart_fill_outputs(force=True, announce=True)).grid(row=0, column=1, sticky="e", padx=(8, 8))
         self.run_button = ttk.Button(action_bar, text="开始生成音频 / 视频", style="Primary.TButton", command=self.run_action)
@@ -378,6 +389,14 @@ class VideoWorkbenchApp:
 
     def _on_mode_change(self):
         self.update_mode_ui()
+        self.update_summary()
+
+    def _on_theme_selected(self):
+        label = self.theme_combo.get()
+        for key, lbl in card_render.THEME_LABELS.items():
+            if lbl == label:
+                self.card_theme_var.set(key)
+                break
         self.update_summary()
 
     def _on_mousewheel(self, event):
@@ -527,7 +546,8 @@ class VideoWorkbenchApp:
         lrc = self.lrc_var.get().strip() or "未装载歌词"
         clip_audio = f"{self.start_var.get().strip() or '00:00:00'}  至  {self.end_var.get().strip() or 'End'}"
         clip_video = f"{self.video_start_var.get().strip() or '00:00:00'}  至  {self.video_end_var.get().strip() or 'End'}"
-        vinyl_mode = "开启 (极简圆角卡片歌词)" if self.vinyl_mode_var.get() else "关闭 (静态图片画面)"
+        theme_label = card_render.THEME_LABELS.get(self.card_theme_var.get(), "极简高级")
+        vinyl_mode = f"开启 ({theme_label})" if self.vinyl_mode_var.get() else "关闭 (静态图片画面)"
 
         if mode == MODE_LOCAL_FOLDER:
             output_info = self.batch_output_var.get().strip() or "默认输出到源文件夹"
@@ -672,8 +692,9 @@ class VideoWorkbenchApp:
                 logger=self._worker_log,
                 use_vinyl_mode=self.vinyl_mode_var.get(),
                 lrc_path=self.lrc_var.get().strip(),
-                video_start_time=self.video_start_var.get().strip(), 
-                video_end_time=self.video_end_var.get().strip(),     
+                video_start_time=self.video_start_var.get().strip(),
+                video_end_time=self.video_end_var.get().strip(),
+                card_theme=self.card_theme_var.get(),
             )
 
             output_anchor = result.video_output or result.audio_output or self.audio_var.get().strip()
@@ -703,8 +724,9 @@ class VideoWorkbenchApp:
                     logger=self._worker_log,
                     use_vinyl_mode=self.vinyl_mode_var.get(),
                     lrc_path=self.lrc_var.get().strip(),
-                    video_start_time=self.video_start_var.get().strip(), 
-                    video_end_time=self.video_end_var.get().strip(),     
+                    video_start_time=self.video_start_var.get().strip(),
+                    video_end_time=self.video_end_var.get().strip(),
+                    card_theme=self.card_theme_var.get(),
                 )
                 if result.success:
                     success_count += 1
@@ -755,8 +777,10 @@ class VideoWorkbenchApp:
         self.start_var.set(data.get("start", "00:00:00"))
         self.end_var.set(data.get("end", "End"))
         self.video_start_var.set(data.get("video_start", "00:00:00")) 
-        self.video_end_var.set(data.get("video_end", "End"))         
+        self.video_end_var.set(data.get("video_end", "End"))
         self.auto_open_var.set(data.get("auto_open", True))
+        self.card_theme_var.set(data.get("card_theme", DEFAULT_CARD_THEME))
+        self.theme_combo.set(card_render.THEME_LABELS.get(self.card_theme_var.get(), "极简高级"))
 
     def save_settings(self):
         data = {
@@ -770,9 +794,10 @@ class VideoWorkbenchApp:
             "batch_output": self.batch_output_var.get().strip(),
             "start": self.start_var.get().strip(),
             "end": self.end_var.get().strip(),
-            "video_start": self.video_start_var.get().strip(), 
-            "video_end": self.video_end_var.get().strip(),     
+            "video_start": self.video_start_var.get().strip(),
+            "video_end": self.video_end_var.get().strip(),
             "auto_open": self.auto_open_var.get(),
+            "card_theme": self.card_theme_var.get(),
         }
         try:
             with open(SETTINGS_FILE, "w", encoding="utf-8") as handle:

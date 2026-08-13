@@ -1,6 +1,6 @@
-# 本项目不依赖第三方 Python 包（全部使用标准库 + 内置 ffmpeg/ffmpeg.exe）。
+# 运行依赖（卡片歌词模式需要 Pillow 预渲染封面卡；其余为标准库 + 内置 ffmpeg/ffmpeg.exe）
+pillow>=10.0
+
 # 运行入口：python workbench_app.py
-#
-# 可选依赖：
-#   pillow —— 仅 create_shortcut.py 需要（当 logo.ico 格式不标准时自动转换为合规 ICO）
-#   pyinstaller —— 打包 EXE 时使用
+# 可选：pyinstaller —— 打包 EXE 时使用
+#   pyinstaller -F -w --add-binary "ffmpeg/ffmpeg.exe;ffmpeg" workbench_app.py
