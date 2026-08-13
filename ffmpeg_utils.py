@@ -68,6 +68,9 @@ def run_ffmpeg(args: Sequence[str], log: Optional[Callable[[str], None]] = None)
     command = [get_ffmpeg_path(), *[str(arg) for arg in args]]
     _emit(log, f"\n--- 开始执行 FFmpeg ---\n命令: {_format_command(command)}")
 
+    # Windows 下禁止 ffmpeg 弹出命令行窗口（CREATE_NO_WINDOW = 0x08000000）
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
+
     try:
         # 以二进制模式读取，避免 Python 默认的编码转换器在不匹配时报错
         process = subprocess.Popen(
@@ -76,6 +79,7 @@ def run_ffmpeg(args: Sequence[str], log: Optional[Callable[[str], None]] = None)
             stderr=subprocess.STDOUT,
             bufsize=0,
             shell=False,
+            creationflags=creationflags,
         )
 
         if process.stdout:

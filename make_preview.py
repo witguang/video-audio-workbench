@@ -14,6 +14,8 @@ import card_render
 from card_render import THEMES, THEME_LABELS
 
 FFMPEG = os.path.abspath("ffmpeg/ffmpeg.exe")
+# Windows 下禁止 ffmpeg 弹出命令行窗口
+CREATIONFLAGS = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
 SAMPLE_LRC = os.path.join("preview", "sample.lrc")
 SAMPLE_LRC_CONTENT = """[ti:Like Me]
 [ar:Alex Sampson and Mattie Pruitt]
@@ -54,7 +56,8 @@ def make_frame(theme_key: str, t: float = 5.5, out_png: str = ""):
 
     # 一次性合成静态背景，再取最终命令里的 filter_complex 渲染单帧
     bg_cmd = card_render.build_background_command(image, card, theme_key, bg)
-    if subprocess.run([FFMPEG, *bg_cmd], capture_output=True, text=True).returncode != 0:
+    if subprocess.run([FFMPEG, *bg_cmd], capture_output=True, text=True,
+                      creationflags=CREATIONFLAGS).returncode != 0:
         _cleanup(card, ass, bg)
         print(f"[{theme_key}] 背景合成失败")
         return False
@@ -73,7 +76,7 @@ def make_frame(theme_key: str, t: float = 5.5, out_png: str = ""):
         out_png,
     ]
     try:
-        r = subprocess.run(args, capture_output=True, text=True)
+        r = subprocess.run(args, capture_output=True, text=True, creationflags=CREATIONFLAGS)
     finally:
         _cleanup(card, ass, bg)
     if r.returncode != 0:

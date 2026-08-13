@@ -75,7 +75,6 @@ THEMES = {
         "title": {"size": 78, "color": (255, 255, 255, 255), "y": 350, "max_w": 860},
         "divider": {"y": 478, "w": 420, "h": 2, "color": (255, 255, 255, 60)},
         "artist": {"size": 44, "color": (211, 219, 232, 255), "y": 522, "max_w": 860},
-        "meta": ("— 卡片歌词模式 —", 30, (150, 164, 186, 255), (940, 580), 6),
         "accent": (122, 162, 255),
         "lyrics_size": 54,
         "lyrics_tracking": 2,
@@ -86,7 +85,7 @@ THEMES = {
         "bg_blur": 50,
         "bg_saturation": 1.3,
         "bg_brightness": -0.09,
-        "panel_rect": (200, 110, 1720, 970),
+        "panel_rect": (200, 110, 1720, 1060),
         "panel_radius": 48,
         "cover_size": 540,
         "cover_xy": (302, 275),
@@ -97,7 +96,7 @@ THEMES = {
         "accent": (159, 227, 255),
         "lyrics_size": 56,
         "lyrics_tracking": 2,
-        "lyrics_y": (868, 950, 1032),
+        "lyrics_y": (858, 940, 1022),
     },
 }
 
@@ -265,12 +264,6 @@ def _render_card_layout(canvas, draw, cover, title, artist, cfg, theme_key):
         _draw_tracked(draw2, eb_xy[0], cfg["artist"]["y"], artist, afont,
                       cfg["artist"]["color"], tracking=1,
                       anchor_x="l" if theme_key == "player" else "m")
-
-    # player 主题的底部小注记
-    if "meta" in cfg:
-        m_text, m_size, m_color, m_xy, m_track = cfg["meta"]
-        _draw_tracked(draw2, m_xy[0], m_xy[1], m_text, _font(False, m_size),
-                      m_color, tracking=m_track, anchor_x="l")
 
 
 def _render_glass(canvas, draw, cover, title, artist, cfg):
