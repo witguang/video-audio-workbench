@@ -186,6 +186,7 @@ def mode1_process(
     video_start_time="00:00:00",
     video_end_time="End",
     card_theme=DEFAULT_CARD_THEME,
+    fix_lyric_overlap=True,
 ):
     video_path = video_path.strip()
     image_path = image_path.strip()
@@ -240,10 +241,15 @@ def mode1_process(
                 if not run_ffmpeg(full_audio_cmd, log=logger):
                     return ProcessResult(False, "完整音频提取失败。")
 
-                # B. 歌词(LRC/SRT/VTT) -> ASS（当前行高亮、上一行压暗、淡入淡出）
+                # B. 歌词(LRC/SRT/VTT/plain) -> ASS（当前行高亮、上一行压暗、淡入淡出）
                 if lrc_path and os.path.exists(lrc_path):
                     _emit(logger, f"正在解析歌词文件: {lrc_path}")
-                    temp_lyrics_ass = card_render.convert_lrc_to_ass(lrc_path, card_theme)
+                    if os.path.splitext(lrc_path)[1].lower() in (".plain", ".txt"):
+                        _emit(logger, "纯歌词文件：将自动匹配同目录同名 SRT 的时间轴。")
+                    if fix_lyric_overlap:
+                        _emit(logger, "已启用：消除歌词时间重叠（相邻行自动截断）。")
+                    temp_lyrics_ass = card_render.convert_lrc_to_ass(
+                        lrc_path, card_theme, fix_overlap=fix_lyric_overlap)
                     if temp_lyrics_ass:
                         _emit(logger, "歌词解析并转换为 ASS 高亮字幕成功。")
                     else:

@@ -44,7 +44,7 @@ MODE_CONFIG = {
         "source_mode": SOURCE_LOCAL,
         "guide": [
             "1. 选择本机视频文件。",
-            "2. 选择封面图片（用于生成视频），可在此指定歌词文件（LRC/SRT/VTT）。",
+            "2. 选择封面图片（用于生成视频），可在此指定歌词文件（LRC/SRT/VTT/纯歌词）。",
             "3. 推荐开启极简卡片歌词模式，并独立配置音/视频裁剪范围！",
         ],
     },
@@ -150,6 +150,7 @@ class VideoWorkbenchApp:
 
         self.auto_open_var = tk.BooleanVar(value=True)
         self.card_theme_var = tk.StringVar(value=DEFAULT_CARD_THEME)
+        self.fix_overlap_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar()
         self.summary_var = tk.StringVar()
         self.guide_var = tk.StringVar()
@@ -296,9 +297,15 @@ class VideoWorkbenchApp:
         ttk.Entry(input_box, textvariable=self.image_var).grid(row=1, column=1, sticky="ew", padx=8, pady=(0, 6))
         ttk.Button(input_box, text="选择图片", style="Secondary.TButton", command=self.browse_image).grid(row=1, column=2, sticky="ew", pady=(0, 6))
 
-        ttk.Label(input_box, text="同步歌词 LRC/SRT/VTT（可选）", style="Body.TLabel").grid(row=2, column=0, sticky="w", pady=(0, 6))
+        ttk.Label(input_box, text="同步歌词 LRC/SRT/VTT/纯歌词（可选）", style="Body.TLabel").grid(row=2, column=0, sticky="w", pady=(0, 6))
         ttk.Entry(input_box, textvariable=self.lrc_var).grid(row=2, column=1, sticky="ew", padx=8, pady=(0, 6))
         ttk.Button(input_box, text="选择歌词", style="Secondary.TButton", command=self.browse_lrc).grid(row=2, column=2, sticky="ew", pady=(0, 6))
+        ttk.Checkbutton(
+            input_box,
+            text="消除歌词时间重叠（SRT/VTT 相邻行太近时自动截断，防止两行歌词同时高亮）",
+            variable=self.fix_overlap_var,
+            style="Body.TLabel",
+        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(0, 2))
 
         # 第 3 步（独立设置音视频范围）
         clip_box = ttk.LabelFrame(parent, text="第 3 步：设置处理范围（音频与视频独立控制）", style="Section.TLabelframe", padding=14)
@@ -447,8 +454,9 @@ class VideoWorkbenchApp:
 
     def browse_lrc(self):
         path = filedialog.askopenfilename(parent=self.root, filetypes=[
-            ("歌词/字幕文件", "*.lrc *.srt *.vtt"),
+            ("歌词/字幕文件", "*.lrc *.srt *.vtt *.plain *.txt"),
             ("LRC 歌词", "*.lrc"), ("SRT 字幕", "*.srt"), ("VTT 字幕", "*.vtt"),
+            ("纯歌词（自动匹配同名 SRT 时间轴）", "*.plain"), ("文本歌词", "*.txt"),
             ("所有文件", "*.*")])
         if path:
             self.lrc_var.set(path)
@@ -698,6 +706,7 @@ class VideoWorkbenchApp:
                 video_start_time=self.video_start_var.get().strip(),
                 video_end_time=self.video_end_var.get().strip(),
                 card_theme=self.card_theme_var.get(),
+                fix_lyric_overlap=self.fix_overlap_var.get(),
             )
 
             output_anchor = result.video_output or result.audio_output or self.audio_var.get().strip()
@@ -730,6 +739,7 @@ class VideoWorkbenchApp:
                     video_start_time=self.video_start_var.get().strip(),
                     video_end_time=self.video_end_var.get().strip(),
                     card_theme=self.card_theme_var.get(),
+                    fix_lyric_overlap=self.fix_overlap_var.get(),
                 )
                 if result.success:
                     success_count += 1
@@ -784,6 +794,7 @@ class VideoWorkbenchApp:
         self.auto_open_var.set(data.get("auto_open", True))
         self.card_theme_var.set(data.get("card_theme", DEFAULT_CARD_THEME))
         self.theme_combo.set(card_render.THEME_LABELS.get(self.card_theme_var.get(), "极简高级"))
+        self.fix_overlap_var.set(data.get("fix_overlap", True))
 
     def save_settings(self):
         data = {
@@ -801,6 +812,7 @@ class VideoWorkbenchApp:
             "video_end": self.video_end_var.get().strip(),
             "auto_open": self.auto_open_var.get(),
             "card_theme": self.card_theme_var.get(),
+            "fix_overlap": self.fix_overlap_var.get(),
         }
         try:
             with open(SETTINGS_FILE, "w", encoding="utf-8") as handle:

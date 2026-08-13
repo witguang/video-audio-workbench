@@ -16,7 +16,7 @@ import re
 from typing import Optional
 
 try:
-    from PIL import Image, ImageDraw, ImageFont, ImageFilter
+    from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageFilter
     PIL_AVAILABLE = True
 except ImportError:  # pragma: no cover
     PIL_AVAILABLE = False
@@ -200,7 +200,11 @@ def _render_cover_card(cover: Image.Image, size: int, radius: int,
         sheen_img.putalpha(grad)
         smask = Image.new("L", (w, h), 0)
         ImageDraw.Draw(smask).rounded_rectangle([0, 0, w - 1, h - 1], radius=radius, fill=255)
-        canvas.paste(sheen_img, (margin - 30, margin - 30), smask)
+        # 注意：不能用 paste(sheen_img, box, smask)——掩码 alpha 恒为 255，会把白色反光
+        # 整块盖在封面上导致卡片变白。先用圆角掩码裁剪反光自身的渐变 alpha，再按自身
+        # 透明度合成，封面才会保留可见。
+        sheen_img.putalpha(ImageChops.multiply(sheen_img.getchannel("A"), smask))
+        canvas.alpha_composite(sheen_img, (margin - 30, margin - 30))
 
     return canvas
 
@@ -425,17 +429,198 @@ def _parse_vtt(content: str) -> list:
     return cues
 
 
-def _parse_lyrics(path: str) -> list:
-    """按扩展名分发解析，统一返回 [(start_ms, end_ms, text), ...]。"""
+def _parse_plain(content: str) -> list:
+    """纯歌词：没有时间轴，一行一句。返回 [(0, 0, text), ...]，时间轴后续由同名 SRT 匹配填充。"""
+    out = []
+    for line in content.splitlines():
+        text = _clean_cue_text(line)
+        if text:
+            out.append((0, 0, text))
+    return out
+
+
+def _resolve_overlap(lines: list) -> list:
+    """消除歌词时间重叠：每行结尾不晚于下一行起点。
+
+    SRT/VTT 的字幕时间轴常常相互重叠（词级字幕尤其严重），叠加渲染时会同时出现
+    两行高亮。这里把每行结尾裁剪到「下一行起点」，杜绝重叠；被完全吞掉的行丢弃。
+    """
+    out = []
+    n = len(lines)
+    for i in range(n):
+        ms, end_ms, text = lines[i]
+        limit = lines[i + 1][0] if i + 1 < n else end_ms
+        new_end = min(end_ms, limit)
+        if new_end > ms:
+            out.append((ms, new_end, text))
+    return out
+
+
+def _match_srt_timeline(plain_lines: list, plain_path: str) -> list:
+    """纯歌词行 -> 用同目录同名 SRT 的时间轴做逐行匹配。
+
+    背景：词级 SRT 字幕常带错词/空行/重叠时间，而 .plain 是干净的一行一句歌词。
+    这里把 SRT 的时间轴嫁接到 plain 每行上。
+
+    匹配策略（token 级 LCS 全局对齐，天然单调、正确处理重复段落）：
+    1. 同目录查找同主名的 .srt。
+    2. 把 plain 全文与 SRT 全文切分成 token 流，做最长公共子序列(LCS)对齐，
+       得到「每行歌词第一个成功配对的 token」对应到哪个 SRT cue，取其起点。
+       —— 这样词级字幕（一行歌词横跨多条 cue）与重复的副歌都能逐次正确对应，
+          不会像贪心匹配那样被同词句误导到错误的重复段落。
+    3. 未匹配到的行在最近两个锚点之间按 token 占比线性插值；开头/结尾越界按 3.5s/行外推。
+    4. 找不到配对 SRT 或完全无法匹配时，退化为均匀间隔（3.5s/行）。
+    """
+    dirname = os.path.dirname(os.path.abspath(plain_path))
+    base = os.path.splitext(os.path.basename(plain_path))[0]
+    srt_path = os.path.join(dirname, base + ".srt")
+    if not os.path.isfile(srt_path):
+        # 没有配对 SRT：退化为均匀间隔，保证纯歌词仍能渲染
+        return [(i * 3500, (i + 1) * 3500, text) for i, (_, _, text) in enumerate(plain_lines)]
+    srt_lines = _parse_srt(_read_text(srt_path))
+    if not srt_lines:
+        return [(i * 3500, (i + 1) * 3500, text) for i, (_, _, text) in enumerate(plain_lines)]
+
+    def toks(s: str) -> list:
+        # 小写并按非字母/数字/中文切分（isalnum 已涵盖中日韩字符）
+        buf, out = [], []
+        for ch in s.lower():
+            if ch.isalnum():
+                buf.append(ch)
+            elif buf:
+                out.append("".join(buf))
+                buf = []
+        if buf:
+            out.append("".join(buf))
+        return out
+
+    plain_toks = [toks(text) for _, _, text in plain_lines]
+    srt_toks = [toks(text) for _, _, text in srt_lines]
+    n_cues = len(srt_lines)
+    # 展平为 (行号, token) 流
+    P = [(li, t) for li, ts in enumerate(plain_toks) for t in ts]
+    S = [(ci, t) for ci, ts in enumerate(srt_toks) for t in ts]
+    p, s = len(P), len(S)
+    if not P or not S:
+        return plain_lines
+
+    starts = [None] * len(plain_lines)
+    if p * s <= 2_000_000:  # LCS 矩阵大小兜底，超大文本走贪心窗口
+        # LCS 动态规划（长度表）
+        dp = [[0] * (s + 1) for _ in range(p + 1)]
+        for i in range(1, p + 1):
+            ptok = P[i - 1][1]
+            row_prev = dp[i - 1]
+            row_cur = dp[i]
+            for j in range(1, s + 1):
+                if ptok == S[j - 1][1]:
+                    row_cur[j] = row_prev[j - 1] + 1
+                elif row_prev[j] >= row_cur[j - 1]:
+                    row_cur[j] = row_prev[j]
+                else:
+                    row_cur[j] = row_cur[j - 1]
+        # 回溯：记录每个配对的 plain token 对应的 srt token 下标
+        matched_srt = {}
+        i, j = p, s
+        while i > 0 and j > 0:
+            if P[i - 1][1] == S[j - 1][1] and dp[i][j] == dp[i - 1][j - 1] + 1:
+                matched_srt[i - 1] = j - 1
+                i -= 1
+                j -= 1
+            elif dp[i - 1][j] >= dp[i][j - 1]:
+                i -= 1
+            else:
+                j -= 1
+        # 每行取「第一个配对 token」所在 cue 的起点
+        line_first_idx = [0]
+        for ts in plain_toks:
+            line_first_idx.append(line_first_idx[-1] + len(ts))
+        for li, ts in enumerate(plain_toks):
+            for idx in range(line_first_idx[li], line_first_idx[li + 1]):
+                if idx in matched_srt:
+                    starts[li] = srt_lines[S[matched_srt[idx]][0]][0]
+                    break
+    else:
+        # 超大文本：贪心窗口（按 token 重合度取第一句达标 cue，极少数情况触发）
+        WINDOW = 40
+        MIN_OVERLAP = 0.5
+        n_cues = len(srt_lines)
+        pointer = 0
+        for li, ts in enumerate(plain_toks):
+            target_set = set(ts)
+            for k in range(pointer, min(pointer + WINDOW, n_cues)):
+                cue_set = set(srt_toks[k])
+                if not cue_set:
+                    continue
+                inter = len(target_set & cue_set)
+                if 2.0 * inter / (len(ts) + len(srt_toks[k])) >= MIN_OVERLAP:
+                    starts[li] = srt_lines[k][0]
+                    pointer = k + 1
+                    break
+
+    anchors = [i for i, st in enumerate(starts) if st is not None]
+    if not anchors:
+        # 完全无法匹配：退化为均匀间隔
+        return [(i * 3500, (i + 1) * 3500, text) for i, (_, _, text) in enumerate(plain_lines)]
+
+    prefix = [0]
+    for ts in plain_toks:
+        prefix.append(prefix[-1] + max(len(ts), 1))
+
+    for i, st in enumerate(starts):
+        if st is not None:
+            continue
+        prev = next((a for a in reversed(anchors) if a < i), None)
+        nxt = next((a for a in anchors if a > i), None)
+        if prev is not None and nxt is not None:
+            t_prev, t_next = starts[prev], starts[nxt]
+            span_p = max(prefix[nxt] - prefix[prev], 1)
+            starts[i] = int(t_prev + (t_next - t_prev) * (prefix[i] - prefix[prev]) / span_p)
+        elif prev is not None:
+            starts[i] = starts[prev] + (i - prev) * 3500  # 结尾：3.5s/行外推
+        else:
+            starts[i] = max(0, starts[nxt] - (nxt - i) * 3500)  # 开头：3.5s/行回退
+
+    # 起点严格单调：相邻两行若撞到同一条 cue（或多行共享同一时间），把后行推到
+    # 下一条更晚的 cue 起点，避免 _resolve_overlap 把整行丢弃。
+    for i in range(1, len(starts)):
+        if starts[i] <= starts[i - 1]:
+            cand = next((srt_lines[k][0] for k in range(n_cues)
+                         if srt_lines[k][0] > starts[i - 1]), None)
+            starts[i] = cand if cand is not None else starts[i - 1] + 500
+
+    # 结尾统一为「下一行起点」，最后一行 +3.5s
+    return [(starts[i], starts[i + 1] if i + 1 < len(plain_lines) else starts[i] + 3500, text)
+            for i, (_, _, text) in enumerate(plain_lines)]
+
+
+def _parse_lyrics(path: str, fix_overlap: bool = True) -> list:
+    """按扩展名分发解析，统一返回 [(start_ms, end_ms, text), ...]。
+
+    - LRC：时间轴来自 [mm:ss]，结尾用下一句起点推断。
+    - SRT / VTT：用字幕自带起止时间轴。
+    - plain / txt：无时间轴的纯歌词行，自动寻找同目录同名 .srt 做时间轴匹配。
+    fix_overlap=True 时统一消除重叠（每行结尾不晚于下一行起点）。
+    """
     content = _read_text(path)
     if not content:
         return []
     ext = os.path.splitext(path)[1].lower()
     if ext == ".vtt":
-        return _parse_vtt(content)
-    if ext == ".srt":
-        return _parse_srt(content)
-    return _parse_lrc(content)
+        lines = _parse_vtt(content)
+    elif ext == ".srt":
+        lines = _parse_srt(content)
+    elif ext == ".plain":
+        lines = _parse_plain(content)
+    else:
+        lines = _parse_lrc(content) or _parse_plain(content)
+    if not lines:
+        return []
+    if all(ms == 0 and end_ms == 0 for ms, end_ms, _ in lines):
+        lines = _match_srt_timeline(lines, path)
+    if fix_overlap:
+        lines = _resolve_overlap(lines)
+    return lines
 
 
 def _fmt_ass(ms: int) -> str:
@@ -450,16 +635,18 @@ def _ass_escape(text: str) -> str:
     return text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
 
 
-def convert_lrc_to_ass(lrc_path: str, theme_key: str) -> str:
-    """歌词(LRC/SRT/VTT) -> ASS（Spotify 配色逻辑）。
+def convert_lrc_to_ass(lrc_path: str, theme_key: str, fix_overlap: bool = True) -> str:
+    """歌词(LRC/SRT/VTT/plain) -> ASS（Spotify 配色逻辑）。
 
     同一时刻展示三行：上一行 / 当前行 / 下一行。
     当前行纯白高亮并略放大，上一行与下一行 45% 半透明白（灰感），带淡入淡出。
-    SRT/VTT 用字幕自带的起止时间轴，LRC 用「下一句起点」推断结尾。
+    SRT/VTT 用字幕自带的起止时间轴，LRC 用「下一句起点」推断结尾，
+    plain 纯歌词自动匹配同目录同名 SRT 时间轴。
+    fix_overlap=True 时裁剪每行结尾不晚于下一行起点，避免两行歌词同时高亮重叠。
     各主题仅在字号上略有差异，配色逻辑统一，与 Spotify 歌词一致。
     """
     cfg = THEMES[theme_key]
-    lines = _parse_lyrics(lrc_path)
+    lines = _parse_lyrics(lrc_path, fix_overlap=fix_overlap)
     if not lines:
         return ""
 
