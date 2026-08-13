@@ -145,13 +145,13 @@ def _build_full_audio_command(video_path: str, audio_out: str):
 
 def _build_static_video_command(image_path: str, audio_out: str, video_out: str):
     """静态背景合成（直接利用已裁好的音频进行快速单步组装）。"""
-    audio_codec_args = ["-c:a", "aac", "-b:a", "192k"] if video_out.lower().endswith(".mp4") else ["-c:a", "copy"]
+    audio_codec_args = ["-c:a", "aac", "-b:a", "160k", "-ac", "2"] if video_out.lower().endswith(".mp4") else ["-c:a", "copy"]
     return [
         "-y",
         "-loop",
         "1",
         "-framerate",
-        "1",
+        str(card_render.VIDEO_FPS),
         "-i",
         image_path,
         "-i",
@@ -162,6 +162,8 @@ def _build_static_video_command(image_path: str, audio_out: str, video_out: str)
         "ultrafast",
         "-tune",
         "stillimage",
+        "-r",
+        str(card_render.VIDEO_FPS),
         "-vf",
         "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p",
         *audio_codec_args,
@@ -198,6 +200,7 @@ def mode1_process(
     temp_video_file_path = None
     temp_lyrics_ass = None
     temp_card_path = None
+    temp_bg_path = None
     temp_full_audio_path = None
     temp_full_video_path = None
 
@@ -251,11 +254,19 @@ def mode1_process(
                 temp_card_path = card_render.render_static_layer(
                     image_path, os.path.basename(video_path), card_theme)
 
-                # D. 合成整首歌长度的视频（歌词与原歌曲完整对齐，不在此处做中间裁剪）
+                # D. 一次性合成静态背景（模糊+暗角+遮罩+卡片层只渲染一帧，大幅加速编码）
+                temp_bg_path = os.path.join(os.getcwd(), "temp_bg.png")
+                _emit(logger, "正在合成静态背景（仅渲染一帧，加速整体编码）...")
+                bg_cmd = card_render.build_background_command(
+                    image_path, temp_card_path, card_theme, temp_bg_path)
+                if not run_ffmpeg(bg_cmd, log=logger):
+                    return ProcessResult(False, "静态背景合成失败。")
+
+                # E. 合成整首歌长度的视频（歌词与原歌曲完整对齐，不在此处做中间裁剪）
                 temp_full_video_path = os.path.join(os.getcwd(), "temp_full_video.mp4")
                 _emit(logger, "正在进行全时值高清歌词视频合成...")
                 card_cmd = card_render.build_card_command(
-                    temp_full_audio_path, image_path, temp_card_path,
+                    temp_full_audio_path, temp_bg_path,
                     temp_lyrics_ass or "", card_theme, temp_full_video_path)
                 if not run_ffmpeg(card_cmd, log=logger):
                     return ProcessResult(False, "完整视频合成失败。")
@@ -273,9 +284,10 @@ def mode1_process(
                     "-i", temp_full_video_path,
                     "-c:v", "libx264",
                     "-preset", "ultrafast",  # 极速重编码，精准定位时间点到毫秒
-                    "-crf", "17",
+                    "-crf", str(card_render.VIDEO_CRF),
                     "-c:a", "aac",
-                    "-b:a", "192k",
+                    "-b:a", card_render.AUDIO_BITRATE,
+                    "-ac", "2",
                     "-aspect", "16:9",
                     video_out
                 ])
@@ -319,6 +331,13 @@ def mode1_process(
                     _emit(logger, "已清理临时封面卡片层。")
                 except OSError:
                     pass
+        # 自动清理临时静态背景图
+        if temp_bg_path and os.path.exists(temp_bg_path):
+            try:
+                os.remove(temp_bg_path)
+                _emit(logger, "已清理临时静态背景图。")
+            except OSError:
+                pass
         # 自动清理后台提取的临时基准完整音频流
         if temp_full_audio_path and os.path.exists(temp_full_audio_path):
             try:

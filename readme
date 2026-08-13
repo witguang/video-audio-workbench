@@ -22,6 +22,10 @@
 卡片主题说明：
 - 主题在界面底部「卡片风格」下拉框选择，选择结果会存入 app_settings.json。
 - 渲染在 1920x1080 内部画布完成，输出更清晰。
+- 输出规格为轻量档：h264 1080p30（veryfast + CRF23）+ AAC 立体声（160k），兼顾速度与体积。
+- 静态背景（模糊/暗角/遮罩/封面卡）只渲染一帧合成一次，编码阶段仅叠加 ASS 歌词，
+  相比逐帧重算背景滤镜可提速约 10 倍。编码档位可在 card_render.py 顶部的
+  VIDEO_FPS / VIDEO_PRESET / VIDEO_CRF / AUDIO_BITRATE 集中调整。
 - 卡片模式依赖 Pillow（见 requirements.txt）。
 
 运行方式：

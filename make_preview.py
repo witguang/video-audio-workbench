@@ -36,8 +36,8 @@ def _prepare_sample_lrc():
             f.write(SAMPLE_LRC_CONTENT)
 
 
-def _cleanup(card, ass):
-    for p in (card, ass):
+def _cleanup(*paths):
+    for p in paths:
         if p and os.path.exists(p):
             try:
                 os.remove(p)
@@ -50,15 +50,22 @@ def make_frame(theme_key: str, t: float = 5.5, out_png: str = ""):
     _prepare_sample_lrc()
     ass = card_render.convert_lrc_to_ass(SAMPLE_LRC, theme_key)
     card = card_render.render_static_layer(image, os.path.basename(video), theme_key)
+    bg = os.path.join("preview", "_temp_bg.png")
 
-    cmd = card_render.build_card_command("", image, card, ass or "", theme_key, "")
+    # 一次性合成静态背景，再取最终命令里的 filter_complex 渲染单帧
+    bg_cmd = card_render.build_background_command(image, card, theme_key, bg)
+    if subprocess.run([FFMPEG, *bg_cmd], capture_output=True, text=True).returncode != 0:
+        _cleanup(card, ass, bg)
+        print(f"[{theme_key}] 背景合成失败")
+        return False
+
+    cmd = card_render.build_card_command("", bg, ass or "", theme_key, "")
     fc = cmd[cmd.index("-filter_complex") + 1]
 
     args = [
         FFMPEG, "-y",
         "-f", "lavfi", "-t", "13", "-i", "anullsrc=r=44100:cl=stereo",
-        "-loop", "1", "-framerate", "25", "-i", image,
-        "-loop", "1", "-framerate", "25", "-i", card,
+        "-loop", "1", "-framerate", str(card_render.VIDEO_FPS), "-i", bg,
         "-filter_complex", fc,
         "-map", "[outv]",
         "-frames:v", "1", "-ss", str(t),
@@ -68,7 +75,7 @@ def make_frame(theme_key: str, t: float = 5.5, out_png: str = ""):
     try:
         r = subprocess.run(args, capture_output=True, text=True)
     finally:
-        _cleanup(card, ass)
+        _cleanup(card, ass, bg)
     if r.returncode != 0:
         print(f"[{theme_key}] 渲染失败:\n{(r.stderr or '')[-500:]}")
         return False

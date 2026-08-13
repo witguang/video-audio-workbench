@@ -29,6 +29,13 @@ FONT_BOLD = r"C:/Windows/Fonts/msyhbd.ttc"
 TEMP_CARD_PNG = "temp_card.png"
 TEMP_LYRICS_ASS = "temp_lyrics.ass"
 
+# ==================== 输出配置（轻量 h264 · 1080p30 · AAC 立体声） ====================
+VIDEO_FPS = 30             # 输出帧率 1080p30
+VIDEO_PRESET = "veryfast"  # h264 档位：veryfast 比 medium 快 2-3 倍，文件略大
+VIDEO_CRF = 23             # 画质档：23 为标准档，比 17 快且体积小很多
+AUDIO_BITRATE = "160k"     # AAC 立体声音频码率
+
+
 
 # ==================== 主题配置 ====================
 # 坐标均为 1920x1080 画布；accent 为 0xRRGGBB；ass_accent 为 &HBBGGRR
@@ -418,9 +425,13 @@ def convert_lrc_to_ass(lrc_path: str, theme_key: str) -> str:
 
 # ==================== ffmpeg 合成命令 ====================
 
-def build_card_command(audio_path: str, image_path: str, static_png: str,
-                       ass_file: str, theme_key: str, video_out: str) -> list:
-    """组装卡片模式的 ffmpeg 命令：模糊背景 + 渐变/暗角 + 静态层 + ASS 歌词。"""
+def build_background_command(image_path: str, static_png: str, theme_key: str,
+                             bg_png: str) -> list:
+    """一次性合成「静态背景」PNG：模糊 + 色彩 + 暗角 + 上下渐隐 + 封面卡片层。
+
+    背景是静态不变的，只需渲染一帧，避免编码阶段每一帧都重跑 gblur 等重滤镜，
+    这是卡片模式提速的关键。输出为一张不透明白底 PNG（temp_bg.png）。
+    """
     cfg = THEMES[theme_key]
     W, H = CANVAS_W, CANVAS_H
     blur, sat, bri = cfg["bg_blur"], cfg["bg_saturation"], cfg["bg_brightness"]
@@ -429,42 +440,57 @@ def build_card_command(audio_path: str, image_path: str, static_png: str,
     ty = 300
     filters = [
         # 背景：模糊 + 轻微色彩
-        f"[1:v]scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,crop={W}:{H},"
+        f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,crop={W}:{H},"
         f"gblur=sigma={blur},eq=saturation={sat}:brightness={bri},setsar=1[bg]",
         # 暗角，压出前景
         "[bg]vignette=PI/6[bgv]",
         # 底部渐隐遮罩（保证歌词可读）
-        f"color=s={W}x{H}:c=black:r=25,setsar=1,format=rgba,"
+        f"color=s={W}x{H}:c=black:r=1,setsar=1,format=rgba,"
         f"geq=lum=0:cb=128:cr=128:a='if(lt(Y,{sy}),0,min(255,(Y-{sy})/{H - sy}*215))'[scrim_b]",
         "[bgv][scrim_b]overlay=0:0[bg1]",
         # 顶部渐隐遮罩（保证标题可读）
-        f"color=s={W}x{H}:c=black:r=25,setsar=1,format=rgba,"
+        f"color=s={W}x{H}:c=black:r=1,setsar=1,format=rgba,"
         f"geq=lum=0:cb=128:cr=128:a='if(gt(Y,{ty}),0,min(255,({ty}-Y)/{ty}*125))'[scrim_t]",
         "[bg1][scrim_t]overlay=0:0[bg2]",
         # 静态层（透明 PNG，含封面卡与排版）
-        "[2:v]format=rgba[card]",
-        "[bg2][card]overlay=0:0[bg3]",
+        "[1:v]format=rgba[card]",
+        "[bg2][card]overlay=0:0,format=rgb24[out]",
+    ]
+    return [
+        "-y",
+        "-loop", "1", "-framerate", "1", "-i", image_path,     # input 0：封面原图
+        "-loop", "1", "-framerate", "1", "-i", static_png,      # input 1：静态卡片层
+        "-filter_complex", ",".join(filters),
+        "-map", "[out]",
+        "-frames:v", "1",
+        bg_png,
     ]
 
-    if ass_file:
-        filters.append(f"[bg3]ass={TEMP_LYRICS_ASS}[outv]")
-    else:
-        filters.append("[bg3]setsar=1[outv]")
 
+def build_card_command(audio_path: str, bg_png: str,
+                       ass_file: str, theme_key: str, video_out: str) -> list:
+    """组装最终渲染命令：静态背景循环 + ASS 歌词 + 轻量 h264/AAC 输出。
+
+    背景已提前合成（见 build_background_command），编码阶段只有字幕叠加，
+    1080p30 veryfast 档位即可接近实时输出。
+    """
+    filters = ([f"[1:v]ass={TEMP_LYRICS_ASS}[outv]"] if ass_file
+               else ["[1:v]format=yuv420p[outv]"])
     return [
         "-y",
         "-i", audio_path,                       # input 0：完整基准音频
-        "-loop", "1", "-framerate", "25", "-i", image_path,   # input 1：封面（背景+原始图）
-        "-loop", "1", "-framerate", "25", "-i", static_png,   # input 2：静态层
+        "-loop", "1", "-framerate", str(VIDEO_FPS), "-i", bg_png,   # input 1：静态背景
         "-filter_complex", ",".join(filters),
         "-map", "[outv]",
         "-map", "0:a",
         "-c:v", "libx264",
-        "-preset", "medium",
-        "-crf", "17",
+        "-preset", VIDEO_PRESET,
+        "-crf", str(VIDEO_CRF),
+        "-r", str(VIDEO_FPS),
         "-pix_fmt", "yuv420p",
         "-c:a", "aac",
-        "-b:a", "192k",
+        "-b:a", AUDIO_BITRATE,
+        "-ac", "2",
         "-aspect", "16:9",
         "-shortest",
         video_out,
