@@ -450,19 +450,20 @@ def _resolve_overlap(lines: list) -> list:
 
 
 def _match_srt_timeline(plain_lines: list, plain_path: str) -> list:
-    """纯歌词行 -> 用同目录同名 SRT 的时间轴做逐行匹配。
+    """纯歌词行 -> 用同目录同名 SRT 的时间轴做逐行匹配（每行歌词 = 一个对齐单元）。
 
     背景：词级 SRT 字幕常带错词/空行/重叠时间，而 .plain 是干净的一行一句歌词。
-    这里把 SRT 的时间轴嫁接到 plain 每行上。
-
-    匹配策略（token 级 LCS 全局对齐，天然单调、正确处理重复段落）：
-    1. 同目录查找同主名的 .srt。
-    2. 把 plain 全文与 SRT 全文切分成 token 流，做最长公共子序列(LCS)对齐，
-       得到「每行歌词第一个成功配对的 token」对应到哪个 SRT cue，取其起点。
-       —— 这样词级字幕（一行歌词横跨多条 cue）与重复的副歌都能逐次正确对应，
-          不会像贪心匹配那样被同词句误导到错误的重复段落。
-    3. 未匹配到的行在最近两个锚点之间按 token 占比线性插值；开头/结尾越界按 3.5s/行外推。
-    4. 找不到配对 SRT 或完全无法匹配时，退化为均匀间隔（3.5s/行）。
+    这里把 SRT 的时间轴嫁接到 plain 每行上，且严格以「一行 plain 歌词」为一个单元：
+    1. 同目录查找同主名的 .srt，把 plain 与 SRT 全文切分成 token 流做 LCS 全局对齐
+       （天然单调、正确处理重复段落），得到每行在 SRT 流里配对成功的 token 位置。
+    2. 只有配对置信度足够高的行才作为锚点（配对 token 数 / 行内 token 数 >= 0.5）。
+       弱匹配的行（如 SRT 里根本没出现的歌词，只靠一两个常见词碰运气）视为空档，
+       在最近两个锚点之间按 token 占比线性插值，防止它抢走相邻行真正对应的 cue。
+    3. 锚点起点做亚 cue 细分：取「该行第一个配对 token 在 cue 内的位置比例」对应的
+       时间，而不是整条 cue 的起点，避免整行提前或偏晚、相邻行被挤得太短。
+    4. 起点强制单调递增；结尾统一取下一行起点（最后一行 +3.5s），保证同一时刻
+       只有一行高亮、绝不重叠。
+    找不到配对 SRT 或完全无法匹配时，退化为均匀间隔（3.5s/行）。
     """
     dirname = os.path.dirname(os.path.abspath(plain_path))
     base = os.path.splitext(os.path.basename(plain_path))[0]
@@ -524,15 +525,38 @@ def _match_srt_timeline(plain_lines: list, plain_path: str) -> list:
                 i -= 1
             else:
                 j -= 1
-        # 每行取「第一个配对 token」所在 cue 的起点
+        # —— 每行歌词视为一个单元，由「配对 token 位置」决定锚点 ——
+        # SRT 流下标 -> (cue 序号, cue 内 token 位置)
+        cue_len = [len(ts) for ts in srt_toks]
+        _counter = [0] * n_cues
+        stream_meta = []
+        for ci, _t in S:
+            stream_meta.append((ci, _counter[ci]))
+            _counter[ci] += 1
+
+        # 每行在 SRT 流中配对成功的 token 下标（保持顺序）
         line_first_idx = [0]
         for ts in plain_toks:
             line_first_idx.append(line_first_idx[-1] + len(ts))
+        line_matches = []
         for li, ts in enumerate(plain_toks):
+            ms_ = []
             for idx in range(line_first_idx[li], line_first_idx[li + 1]):
                 if idx in matched_srt:
-                    starts[li] = srt_lines[S[matched_srt[idx]][0]][0]
-                    break
+                    ms_.append(matched_srt[idx])
+            line_matches.append(ms_)
+
+        # 锚点 = 配对置信度 >= 0.5 的行；弱匹配行留空，稍后插值
+        ANCHOR_MIN = 0.5
+        for li, ts in enumerate(plain_toks):
+            ms_ = line_matches[li]
+            if not ms_ or len(ms_) / max(len(ts), 1) < ANCHOR_MIN:
+                continue
+            sidx = ms_[0]
+            ci, pos = stream_meta[sidx]
+            cs, ce, _ = srt_lines[ci]
+            # 亚 cue 细分：第一个配对 token 在 cue 内的位置比例 -> 对应时间
+            starts[li] = int(cs + (ce - cs) * pos / max(cue_len[ci], 1))
     else:
         # 超大文本：贪心窗口（按 token 重合度取第一句达标 cue，极少数情况触发）
         WINDOW = 40
@@ -574,6 +598,9 @@ def _match_srt_timeline(plain_lines: list, plain_path: str) -> list:
         else:
             starts[i] = max(0, starts[nxt] - (nxt - i) * 3500)  # 开头：3.5s/行回退
 
+    # 插值后的原始起点快照：后续单调/最小间隔的顺延只在必要时生效，回拉时以此为下限
+    interp_starts = starts[:]
+
     # 起点严格单调：相邻两行若撞到同一条 cue（或多行共享同一时间），把后行推到
     # 下一条更晚的 cue 起点，避免 _resolve_overlap 把整行丢弃。
     for i in range(1, len(starts)):
@@ -581,6 +608,17 @@ def _match_srt_timeline(plain_lines: list, plain_path: str) -> list:
             cand = next((srt_lines[k][0] for k in range(n_cues)
                          if srt_lines[k][0] > starts[i - 1]), None)
             starts[i] = cand if cand is not None else starts[i - 1] + 500
+
+    # 最小可读时长：每行至少 2.2s，过短的行向后顺延（长间隔自然吸收累计位移）。
+    # 若顺延到超过最后一条 SRT cue 的结束时间，则从尾部回拉，保证不超出歌曲长度。
+    MIN_DUR = 2200
+    for i in range(1, len(starts)):
+        if starts[i] < starts[i - 1] + MIN_DUR:
+            starts[i] = starts[i - 1] + MIN_DUR
+    limit = srt_lines[-1][1] + 500
+    if starts[-1] > limit:
+        for i in range(len(starts) - 2, -1, -1):
+            starts[i] = max(interp_starts[i], min(starts[i], starts[i + 1] - MIN_DUR))
 
     # 结尾统一为「下一行起点」，最后一行 +3.5s
     return [(starts[i], starts[i + 1] if i + 1 < len(plain_lines) else starts[i] + 3500, text)
