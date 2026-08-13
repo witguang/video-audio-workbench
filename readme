@@ -1,0 +1,29 @@
+视频处理工作台（workbench_app.py）
+
+当前主入口：workbench_app.py
+核心处理模块：mode1_ffmpeg.py（调用 ffmpeg_utils.py）
+辅助脚本：create_shortcut.py（在桌面创建启动快捷方式）
+
+三种处理入口：
+1. 本地电脑直处理：直接选择本机视频文件，导出音频，按需合成封面视频。
+2. 本地文件夹批量：直接处理本机整个视频文件夹，可单独指定批量输出目录。
+3. R2 URL 下载后处理：输入 R2 的视频链接，程序会先下载到本地临时文件，再复用同一套处理逻辑。
+
+核心能力：
+- 背景图为空时只导出音频；有背景图时额外生成封面视频。
+- 支持 LRC 同步歌词，可选开启「极简圆角卡片歌词」动态渲染模式。
+- 音频提取范围与视频裁剪范围可独立设置（视频会二次精准切片，防止歌词错位）。
+- 批量模式下会自动规避同一轮任务中的重名输出。
+
+运行方式：
+  python workbench_app.py
+
+打包 EXE（示例）：
+  pip install pyinstaller
+  pyinstaller -F -w --add-binary "ffmpeg/ffmpeg.exe;ffmpeg" workbench_app.py
+
+说明：
+- 项目不依赖任何第三方 Python 库（全部使用标准库 + 内置 ffmpeg/ffmpeg.exe）。
+- create_shortcut.py 仅在需要修复 logo.ico 图标格式时才会用到 Pillow（可选安装）。
+- 配置保存在 app_settings.json（个人本机路径，不入库）。
+- 历史版本的 main_gui.py、update_project.py、mode1_ffmpeg copy.py 已归档至 _archive/。

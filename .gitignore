@@ -1,0 +1,15 @@
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 个人运行配置（含本机视频路径）
+app_settings.json
+
+# 历史归档（已被替代的旧版本，不入库）
+_archive/
+
+# IDE 配置
+.codeartsdoer/
+
+# 临时输出
+outputs/

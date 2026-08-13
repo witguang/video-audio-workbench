@@ -1,0 +1,95 @@
+import os
+import shutil
+import subprocess
+import sys
+from typing import Callable, Optional, Sequence
+
+
+def get_ffmpeg_path() -> str:
+    """自动定位 FFmpeg 可执行文件路径。"""
+    candidate_roots = [
+        os.path.dirname(os.path.abspath(sys.argv[0])),
+        os.path.dirname(os.path.abspath(__file__)),
+        os.getcwd(),
+    ]
+    checked = set()
+
+    for root in candidate_roots:
+        candidate = os.path.normpath(os.path.join(root, "ffmpeg", "ffmpeg.exe"))
+        if candidate in checked:
+            continue
+        checked.add(candidate)
+        if os.path.exists(candidate):
+            return candidate
+
+    # 使用 shutil 寻找系统环境变量中的 ffmpeg
+    system_ffmpeg = shutil.which("ffmpeg")
+    if system_ffmpeg:
+        return system_ffmpeg
+
+    return "ffmpeg"
+
+
+def _format_command(args: Sequence[str]) -> str:
+    parts = []
+    for arg in args:
+        text = str(arg)
+        if not text:
+            parts.append('""')
+        elif any(char.isspace() for char in text) or '"' in text:
+            escaped = text.replace('"', '\\"')
+            parts.append(f'"{escaped}"')
+        else:
+            parts.append(text)
+    return " ".join(parts)
+
+
+def _emit(log: Optional[Callable[[str], None]], message: str):
+    print(message)
+    if log:
+        log(message)
+
+
+def _decode_line(raw_bytes: bytes) -> str:
+    """尝试使用不同编码解析 FFmpeg 的输出，防止 Windows 环境下因编码问题导致乱码。"""
+    for encoding in ("utf-8", "gbk", "cp936", "latin1"):
+        try:
+            return raw_bytes.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw_bytes.decode("utf-8", errors="ignore")
+
+
+def run_ffmpeg(args: Sequence[str], log: Optional[Callable[[str], None]] = None) -> bool:
+    """执行 FFmpeg 命令并实时输出日志。"""
+    if isinstance(args, str):
+        raise TypeError("run_ffmpeg 需要传入参数列表，而不是命令字符串。")
+
+    command = [get_ffmpeg_path(), *[str(arg) for arg in args]]
+    _emit(log, f"\n--- 开始执行 FFmpeg ---\n命令: {_format_command(command)}")
+
+    try:
+        # 以二进制模式读取，避免 Python 默认的编码转换器在不匹配时报错
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=0,
+            shell=False,
+        )
+
+        if process.stdout:
+            for line_bytes in iter(process.stdout.readline, b""):
+                line = _decode_line(line_bytes).rstrip("\r\n")
+                if line:
+                    _emit(log, line)
+
+        process.wait()
+        _emit(log, f"\n--- 任务结束，返回码: {process.returncode} ---\n")
+        return process.returncode == 0
+    except FileNotFoundError:
+        _emit(log, "执行出错: 未找到 FFmpeg，请确认 ffmpeg.exe 已放到项目目录或已加入系统 PATH。")
+        return False
+    except Exception as exc:
+        _emit(log, f"执行出错: {exc}")
+        return False
