@@ -258,11 +258,12 @@ def _render_card_layout(canvas, draw, cover, title, artist, cfg, theme_key):
                   cfg["title"]["color"], tracking=1,
                   shadow=(0, 0, 0, 190), anchor_x="l" if theme_key == "player" else "m")
 
-    # 歌手
+    # 歌手（与标题同款柔和阴影，保证在明亮背景上也能看清）
     if artist:
         afont = _fit_font(draw2, artist, cfg["artist"]["size"], cfg["artist"]["max_w"], False)
         _draw_tracked(draw2, eb_xy[0], cfg["artist"]["y"], artist, afont,
                       cfg["artist"]["color"], tracking=1,
+                      shadow=(0, 0, 0, 190),
                       anchor_x="l" if theme_key == "player" else "m")
 
 
@@ -304,7 +305,8 @@ def _render_glass(canvas, draw, cover, title, artist, cfg):
     if artist:
         afont = _fit_font(draw, artist, cfg["artist"]["size"], cfg["artist"]["max_w"], False)
         _draw_tracked(draw, eb_xy[0], cfg["artist"]["y"], artist, afont,
-                      cfg["artist"]["color"], tracking=1, anchor_x="l")
+                      cfg["artist"]["color"], tracking=1,
+                      shadow=(0, 0, 0, 150), anchor_x="l")
 
 
 # ==================== 歌词(LRC/SRT/VTT) -> ASS（Spotify 配色） ====================
