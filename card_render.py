@@ -38,21 +38,20 @@ THEMES = {
         "bg_blur": 34,
         "bg_saturation": 1.08,
         "bg_brightness": -0.05,
-        "card_size": 600,
-        "card_xy": (660, 110),
+        "card_size": 540,
+        "card_xy": (690, 84),
         "card_radius": 40,
         "card_border": (255, 255, 255, 46),
         "card_shadow": (0, 0, 0, 150),
         "card_sheen": True,
-        "eyebrow": ("NOW PLAYING", 32, (185, 198, 218, 255), (660, 800), 12),
-        "title": {"size": 68, "color": (255, 255, 255, 255), "y": 864, "max_w": 1200},
-        "divider": {"y": 830, "w": 96, "h": 3, "color": (240, 201, 135, 220)},
-        "artist": {"size": 40, "color": (205, 213, 228, 255), "y": 934, "max_w": 1200},
+        "eyebrow": ("NOW PLAYING", 32, (185, 198, 218, 255), (960, 664), 12),
+        "title": {"size": 68, "color": (255, 255, 255, 255), "y": 738, "max_w": 1100},
+        "divider": {"y": 694, "w": 96, "h": 3, "color": (240, 201, 135, 220)},
+        "artist": {"size": 40, "color": (205, 213, 228, 255), "y": 800, "max_w": 1100},
         "accent": (240, 201, 135),
-        "ass_accent": "87C9F0",
-        "lyrics_size": 52,
+        "lyrics_size": 54,
         "lyrics_tracking": 2,
-        "lyrics_margin_v": 140,
+        "lyrics_y": (916, 986, 1056),
     },
     "player": {
         "label": "播放器分栏",
@@ -71,10 +70,9 @@ THEMES = {
         "artist": {"size": 44, "color": (211, 219, 232, 255), "y": 522, "max_w": 860},
         "meta": ("— 卡片歌词模式 —", 30, (150, 164, 186, 255), (940, 580), 6),
         "accent": (122, 162, 255),
-        "ass_accent": "FFA27A",
-        "lyrics_size": 52,
+        "lyrics_size": 54,
         "lyrics_tracking": 2,
-        "lyrics_margin_v": 150,
+        "lyrics_y": (868, 950, 1032),
     },
     "glass": {
         "label": "玻璃拟态",
@@ -90,10 +88,9 @@ THEMES = {
         "divider": {"y": 486, "w": 300, "h": 2, "color": (159, 227, 255, 200)},
         "artist": {"size": 40, "color": (219, 230, 240, 255), "y": 524, "max_w": 660},
         "accent": (159, 227, 255),
-        "ass_accent": "FFE39F",
-        "lyrics_size": 54,
+        "lyrics_size": 56,
         "lyrics_tracking": 2,
-        "lyrics_margin_v": 140,
+        "lyrics_y": (868, 950, 1032),
     },
 }
 
@@ -342,19 +339,35 @@ def _fmt_ass(ms: int) -> str:
     return f"{h}:{m:02d}:{s:02d}.{c // 10:02d}"
 
 
+def _ass_escape(text: str) -> str:
+    """转义 ASS 事件文本中的花括号，防止被 libass 当作样式覆盖标签。"""
+    return text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
+
+
 def convert_lrc_to_ass(lrc_path: str, theme_key: str) -> str:
-    """LRC -> ASS：当前行高亮（Active），上一行压暗 40%（Dim），带淡入淡出。"""
+    """LRC -> ASS（Spotify 配色逻辑）。
+
+    同一时刻展示三行：上一行 / 当前行 / 下一行。
+    当前行纯白高亮并略放大，上一行与下一行 45% 半透明白（灰感），带淡入淡出。
+    各主题仅在字号上略有差异，配色逻辑统一，与 Spotify 歌词一致。
+    """
     cfg = THEMES[theme_key]
     lines = _parse_lrc(lrc_path)
     if not lines:
         return ""
 
-    style_active = (f"Active,Microsoft YaHei,{cfg['lyrics_size']},&H{cfg['ass_accent']},"
-                    f"&H000000FF,&H101010E0,&H64000000,1,0,0,0,100,100,{cfg['lyrics_tracking']},"
-                    f"0,1,1.5,3,2,120,120,{cfg['lyrics_margin_v']},1")
-    style_dim = (f"Dim,Microsoft YaHei,{max(cfg['lyrics_size'] - 12, 28)},&H3FFFFFFF,"
-                 f"&H000000FF,&H101010E0,&H00000000,0,0,0,0,100,100,{cfg['lyrics_tracking']},"
-                 f"0,1,0,0,2,120,120,{cfg['lyrics_margin_v']},1")
+    active_size = cfg.get("lyrics_size", 54)
+    dim_size = max(active_size - 14, 28)
+    tracking = cfg.get("lyrics_tracking", 2)
+    cx = CANVAS_W // 2
+    prev_y, active_y, next_y = cfg.get("lyrics_y", (868, 950, 1032))
+
+    style_active = (f"Active,Microsoft YaHei,{active_size},&H00FFFFFF,&H00FFFFFF,"
+                    f"&H0C0C0C,&H64000000,1,0,0,0,100,100,{tracking},"
+                    f"0,1,1.5,3,2,120,120,120,1")
+    style_dim = (f"Dim,Microsoft YaHei,{dim_size},&H73FFFFFF,&H00FFFFFF,"
+                 f"&H0C0C0C,&H00000000,0,0,0,0,100,100,{tracking},"
+                 f"0,1,0,0,2,120,120,120,1")
 
     head = [
         "[Script Info]",
@@ -379,11 +392,23 @@ def convert_lrc_to_ass(lrc_path: str, theme_key: str) -> str:
         ms, text = lines[i]
         end_ms = lines[i + 1][0] if i + 1 < n else ms + 4000
         start_t, end_t = _fmt_ass(ms), _fmt_ass(end_ms)
-        safe = text.replace("{", "\\{").replace("}", "\\}")
-        events.append(f"Dialogue: 0,{start_t},{end_t},Active,,0,0,0,,{{\\fad(280,260)}}{safe}")
+        safe = _ass_escape(text)
+        # 当前行：纯白高亮
+        events.append(
+            f"Dialogue: 0,{start_t},{end_t},Active,,0,0,0,,"
+            f"{{\\an5\\pos({cx},{active_y})\\fad(280,260)}}{safe}")
+        # 上一行：灰暗
         if i > 0:
-            prev = lines[i - 1][1].replace("{", "\\{").replace("}", "\\}")
-            events.append(f"Dialogue: 0,{start_t},{end_t},Dim,,0,0,0,,{{\\fad(380,360)}}{prev}")
+            prev = _ass_escape(lines[i - 1][1])
+            events.append(
+                f"Dialogue: 0,{start_t},{end_t},Dim,,0,0,0,,"
+                f"{{\\an5\\pos({cx},{prev_y})\\fad(380,360)}}{prev}")
+        # 下一行：灰暗
+        if i + 1 < n:
+            nxt = _ass_escape(lines[i + 1][1])
+            events.append(
+                f"Dialogue: 0,{start_t},{end_t},Dim,,0,0,0,,"
+                f"{{\\an5\\pos({cx},{next_y})\\fad(380,360)}}{nxt}")
 
     path = os.path.join(os.getcwd(), TEMP_LYRICS_ASS)
     with open(path, "w", encoding="utf-8") as f:
