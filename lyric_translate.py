@@ -15,11 +15,15 @@
 key 可写在界面里（存入本机 app_settings.json），也可设对应环境变量，
 环境变量优先级低于界面输入。
 """
+import hashlib
 import json
 import os
 import re
 import urllib.error
 import urllib.request
+
+# 翻译缓存目录：同一首歌词只调一次 API，后续直接复用，省 token
+CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache", "lyric_zh")
 
 PROVIDERS = {
     "deepseek": {
@@ -63,13 +67,53 @@ def _emit(logger, message: str):
         logger(message)
 
 
+def _cache_key(lines, provider, base_url, model) -> str:
+    """翻译缓存键：接口 + 模型 + 英文歌词全文（翻译只由这三者决定）。"""
+    digest = hashlib.sha256()
+    digest.update(f"{provider}\n{base_url}\n{model}\n".encode("utf-8"))
+    for line in lines:
+        digest.update((line + "\n").encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _cache_load(key):
+    path = os.path.join(CACHE_DIR, key + ".zh")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return [ln.rstrip("\n") for ln in f.read().splitlines()]
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _cache_store(key, zh_lines):
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        with open(os.path.join(CACHE_DIR, key + ".zh"), "w", encoding="utf-8") as f:
+            f.write("\n".join(zh_lines))
+    except OSError:
+        pass  # 缓存写失败不影响主流程
+
+
+def clear_translation_cache():
+    """删除全部翻译缓存，下次处理会重新调用 API 翻译。"""
+    if os.path.isdir(CACHE_DIR):
+        for name in os.listdir(CACHE_DIR):
+            if name.endswith(".zh"):
+                try:
+                    os.remove(os.path.join(CACHE_DIR, name))
+                except OSError:
+                    pass
+
+
 def translate_lines(lines, api_key="", provider="deepseek", base_url="", model="",
-                    logger=None) -> list:
+                    logger=None, use_cache=True) -> list:
     """把英文歌词逐行翻译成中文，返回与 lines 等长的中文行列表。
 
     - api_key：界面输入的 key；留空时回退到 PROVIDERS 里的环境变量。
     - 分批调用 chat/completions，携带行号要求逐行返回「行号. 中文」，
       解析后按行号归位；模型漏译/多译的行以空串兜底，保证下标与英文行一一对应。
+    - use_cache=True（默认）时，以「接口+模型+英文歌词全文」为键缓存结果，
+      同一首歌重复处理不再调用 API（省 token）；英文歌词或接口/模型变化自动重新翻译。
     - API key 缺失、网络失败或响应无法解析时抛异常，由调用方决定失败策略。
     """
     if not lines:
@@ -83,13 +127,23 @@ def translate_lines(lines, api_key="", provider="deepseek", base_url="", model="
     base_url = (base_url or "").strip() or cfg["base_url"]
     model = (model or "").strip() or cfg["model"]
 
+    if use_cache:
+        key = _cache_key(lines, provider, base_url, model)
+        cached = _cache_load(key)
+        if cached is not None and len(cached) == len(lines):
+            _emit(logger, f"命中歌词翻译缓存（{len(cached)} 行），跳过 API 调用。")
+            return cached
+
     zh = {}
     for start in range(0, len(lines), BATCH_SIZE):
         batch = lines[start:start + BATCH_SIZE]
         _emit(logger, f"正在调用 {cfg['label']} 翻译歌词第 {start + 1}-{start + len(batch)} 行...")
         content = _chat_completion(base_url, api_key, model, _build_messages(batch))
         zh.update(_parse_translated_response(content, len(batch), start))
-    return [zh.get(i, "") for i in range(len(lines))]
+    result = [zh.get(i, "") for i in range(len(lines))]
+    if use_cache:
+        _cache_store(key, result)
+    return result
 
 
 def _build_messages(batch: list) -> list:

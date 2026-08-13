@@ -345,6 +345,8 @@ class VideoWorkbenchApp:
         self.zh_api_key_entry = ttk.Entry(self.api_row, textvariable=self.zh_api_key_var, show="*")
         self.zh_api_key_entry.pack(side="left", fill="x", expand=True, padx=(4, 12))
         ttk.Label(self.api_row, text="仅存本机，不随视频输出", style="Body.TLabel").pack(side="left")
+        ttk.Button(self.api_row, text="清缓存", style="Secondary.TButton",
+                   command=self.clear_translation_cache).pack(side="left", padx=(8, 0))
         self.zh_provider_var.set(self.zh_provider_labels[0] if self.zh_provider_labels else "DeepSeek")
         self._toggle_bilingual_ui()  # 首次启动默认“关闭”：隐藏两种中文来源行
 
@@ -548,6 +550,11 @@ class VideoWorkbenchApp:
             self.zh_lrc_var.set(path)
             self.set_status(f"已装载中文翻译：{os.path.basename(path)}")
             self.append_log(f"已装载中文翻译文件：{path}")
+
+    def clear_translation_cache(self):
+        lyric_translate.clear_translation_cache()
+        self.set_status("已清除歌词翻译缓存，下次处理将重新调用 API 翻译。")
+        self.append_log("已清除歌词翻译缓存。")
 
     def browse_audio_output(self):
         path = filedialog.asksaveasfilename(parent=self.root, defaultextension=".mp3", filetypes=[("MP3", "*.mp3"), ("M4A", "*.m4a"), ("所有文件", "*.*")])

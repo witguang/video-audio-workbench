@@ -44,6 +44,9 @@
       智谱 GLM   https://open.bigmodel.cn/api/paas/v4/chat/completions     glm-4-flash        ZHIPU_API_KEY
       OpenAI     https://api.openai.com/v1/chat/completions                gpt-4o-mini        OPENAI_API_KEY
     翻译按行号逐行对应（带行号请求、漏译兜底），分批调用避免超长；翻译失败会中止处理并提示。
+  · 翻译缓存（省 token）：同一首歌以「接口+模型+英文歌词全文」为键缓存中文结果到
+    cache/lyric_zh/（不随视频输出、不入库），重复处理同一首歌不再调用 API；英文歌词
+    或接口/模型变化会自动重新翻译。「清缓存」按钮可手动清除全部缓存。
 - 音频提取范围与视频裁剪范围可独立设置（视频会二次精准切片，防止歌词错位）。
 - 批量模式下会自动规避同一轮任务中的重名输出。
 
