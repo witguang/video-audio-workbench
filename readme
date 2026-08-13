@@ -29,10 +29,21 @@
 - 「消除歌词时间重叠」开关（默认开启）：SRT/VTT 相邻两句时间间隔太短、时间轴互相
   重叠时，自动把每行结尾截断到下一行起点，避免两行歌词同时高亮叠在一起；需要保留
   原始字幕节奏时可取消勾选。
-- 双语字幕（主英附中）：勾选「双语字幕」并指定一份中文翻译文件（plain/txt/lrc/srt/vtt，
-  与英文歌词逐行 1:1 对应）后，当前行在英文下方附一行较小的中文译文，上一行与下一行
-  仍只显示英文灰暗行。中文只提供译文文本，时间轴完全由英文行决定；双语模式下三行
-  位置自动错开、字号收紧，避免两行高的当前行与上/下行重叠。
+- 双语字幕（主英附中）：中文来源三选一——「关闭 / 中文翻译文件 / API 自动翻译」。
+  任一开启后，当前行在英文下方附一行较小的中文译文，上一行与下一行仍只显示英文灰暗行；
+  中文只提供译文文本，时间轴完全由英文行决定；双语模式下三行位置自动错开、字号收紧，
+  避免两行高的当前行与上/下行重叠。
+  · 中文翻译文件：plain/txt/lrc/srt/vtt，与英文歌词逐行 1:1 对应。
+  · API 自动翻译：自动把英文歌词逐行翻译成中文（lyric_translate.py）。界面选接口并填
+    API Key（仅存本机 app_settings.json，不随视频输出；也可设环境变量，界面输入优先）。
+    支持以下官方 Chat Completions 接口（统一 OpenAI 兼容格式，接入新厂商只需在
+    PROVIDERS 表补一条）：
+      DeepSeek   https://api.deepseek.com/chat/completions                 deepseek-chat      DEEPSEEK_API_KEY
+      通义千问   https://dashscope.aliyuncs.com/compatible-mode/v1/...     qwen-plus          DASHSCOPE_API_KEY
+      Kimi       https://api.moonshot.cn/v1/chat/completions               moonshot-v1-8k     MOONSHOT_API_KEY
+      智谱 GLM   https://open.bigmodel.cn/api/paas/v4/chat/completions     glm-4-flash        ZHIPU_API_KEY
+      OpenAI     https://api.openai.com/v1/chat/completions                gpt-4o-mini        OPENAI_API_KEY
+    翻译按行号逐行对应（带行号请求、漏译兜底），分批调用避免超长；翻译失败会中止处理并提示。
 - 音频提取范围与视频裁剪范围可独立设置（视频会二次精准切片，防止歌词错位）。
 - 批量模式下会自动规避同一轮任务中的重名输出。
 

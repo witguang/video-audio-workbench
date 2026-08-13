@@ -723,7 +723,8 @@ def _ass_escape(text: str) -> str:
 
 
 def convert_lrc_to_ass(lrc_path: str, theme_key: str, fix_overlap: bool = True,
-                       zh_path: str = None) -> str:
+                       zh_path: str = None, zh_lines: list = None,
+                       zh_translate_fn: object = None) -> str:
     """歌词(LRC/SRT/VTT/plain) -> ASS（Spotify 配色逻辑）。
 
     同一时刻展示三行：上一行 / 当前行 / 下一行。
@@ -737,14 +738,27 @@ def convert_lrc_to_ass(lrc_path: str, theme_key: str, fix_overlap: bool = True,
     当前行在英文下方叠加一行较小的中文译文（88% 白），上一行/下一行仍只显示英文灰暗行。
     中文按行号与英文行 1:1 配对，双语对齐完全由英文行时间轴决定。
     双语模式下三行位置错开、字号收紧（BILINGUAL_LAYOUT），给中文译文留出空间。
+
+    中文来源的三种方式，按优先级 zh_lines > zh_translate_fn > zh_path：
+    - zh_lines：直接给定与英文行等长的中文行列表（如翻译 API 的返回）。
+    - zh_translate_fn：回调 ``fn(英文文本行列表) -> 中文行列表``，在解析出英文
+      行后调用（如接入翻译 API）。回调抛异常会以 ValueError 向上传播。
+    - zh_path：翻译文件路径，见上。
     """
     cfg = THEMES[theme_key]
     lines = _parse_lyrics(lrc_path, fix_overlap=fix_overlap)
     if not lines:
         return ""
 
-    # 中文翻译按行号配对；只要中文文件有内容即进入双语模式
-    zh_lines = _parse_zh_lines(zh_path) if zh_path else []
+    # 中文来源：直接列表 > 翻译回调 > 翻译文件，取首个非空来源进入双语模式
+    zh_lines = list(zh_lines) if zh_lines else None
+    if zh_lines is None and zh_translate_fn is not None:
+        try:
+            zh_lines = list(zh_translate_fn([text for _, _, text in lines]) or [])
+        except Exception as exc:
+            raise ValueError(f"中文翻译失败: {exc}") from exc
+    elif zh_lines is None:
+        zh_lines = _parse_zh_lines(zh_path) if zh_path else []
     bilingual = bool(zh_lines)
 
     if bilingual:

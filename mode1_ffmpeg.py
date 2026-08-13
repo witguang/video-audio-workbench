@@ -7,6 +7,7 @@ from typing import Callable, Optional
 from urllib.parse import urlparse
 
 import card_render
+import lyric_translate
 from ffmpeg_utils import run_ffmpeg
 
 SOURCE_LOCAL = "local"
@@ -188,6 +189,7 @@ def mode1_process(
     card_theme=DEFAULT_CARD_THEME,
     fix_lyric_overlap=True,
     zh_lyrics_path="",
+    zh_api_config=None,
 ):
     video_path = video_path.strip()
     image_path = image_path.strip()
@@ -255,15 +257,35 @@ def mode1_process(
                             _emit(logger, "检测到同目录同名纯歌词(.plain)：以纯歌词文本和行为准，借用 SRT 时间轴对齐。")
                     if fix_lyric_overlap:
                         _emit(logger, "已启用：消除歌词时间重叠（相邻行自动截断）。")
-                    if zh_lyrics_path:
-                        if os.path.isfile(zh_lyrics_path):
-                            _emit(logger, f"已启用双语字幕（主英附中）：中文翻译文件 {zh_lyrics_path}")
-                        else:
-                            _emit(logger, "双语字幕已勾选但中文翻译文件不存在，将忽略中文。")
-                            zh_lyrics_path = ""
-                    temp_lyrics_ass = card_render.convert_lrc_to_ass(
-                        lrc_path, card_theme, fix_overlap=fix_lyric_overlap,
-                        zh_path=zh_lyrics_path or None)
+                    # 中文来源二选一：API 自动翻译（优先） 或 中文翻译文件
+                    _zh_api = zh_api_config or {}
+                    if _zh_api.get("api_key"):
+                        _provider = _zh_api.get("provider", "deepseek")
+                        _label = lyric_translate.PROVIDERS.get(_provider, {}).get("label", _provider)
+                        _emit(logger, f"已启用双语字幕（主英附中）：调用 {_label} API 自动翻译中文。")
+
+                        def _translate_zh(en_texts):
+                            return lyric_translate.translate_lines(
+                                en_texts,
+                                api_key=_zh_api["api_key"],
+                                provider=_provider,
+                                base_url=_zh_api.get("base_url", ""),
+                                model=_zh_api.get("model", ""),
+                                logger=logger)
+
+                        temp_lyrics_ass = card_render.convert_lrc_to_ass(
+                            lrc_path, card_theme, fix_overlap=fix_lyric_overlap,
+                            zh_translate_fn=_translate_zh)
+                    else:
+                        if zh_lyrics_path:
+                            if os.path.isfile(zh_lyrics_path):
+                                _emit(logger, f"已启用双语字幕（主英附中）：中文翻译文件 {zh_lyrics_path}")
+                            else:
+                                _emit(logger, "已指定中文翻译文件但文件不存在，将忽略中文。")
+                                zh_lyrics_path = ""
+                        temp_lyrics_ass = card_render.convert_lrc_to_ass(
+                            lrc_path, card_theme, fix_overlap=fix_lyric_overlap,
+                            zh_path=zh_lyrics_path or None)
                     if temp_lyrics_ass:
                         _emit(logger, "歌词解析并转换为 ASS 高亮字幕成功。")
                     else:

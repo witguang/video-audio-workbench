@@ -11,6 +11,7 @@ from tkinter.scrolledtext import ScrolledText
 from urllib.parse import urlparse
 
 import card_render
+import lyric_translate
 from mode1_ffmpeg import SOURCE_LOCAL, SOURCE_R2, DEFAULT_CARD_THEME, mode1_process
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -135,8 +136,12 @@ class VideoWorkbenchApp:
         self.video_var = tk.StringVar()
         self.image_var = tk.StringVar()
         self.lrc_var = tk.StringVar()
-        self.bilingual_var = tk.BooleanVar(value=False)
+        # 双语中文来源：off=关闭 / file=中文翻译文件 / api=翻译 API
+        self.zh_mode_var = tk.StringVar(value="off")
         self.zh_lrc_var = tk.StringVar()
+        self.zh_provider_var = tk.StringVar()
+        self.zh_api_key_var = tk.StringVar()
+        self.zh_provider_labels = [cfg["label"] for cfg in lyric_translate.PROVIDERS.values()]
         self.vinyl_mode_var = tk.BooleanVar(value=True)
         self.audio_var = tk.StringVar()
         self.video_out_var = tk.StringVar()
@@ -309,21 +314,39 @@ class VideoWorkbenchApp:
             style="Body.TLabel",
         ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(0, 2))
 
-        # 双语字幕（主英附中）：勾选后显示中文翻译文件选择行
-        ttk.Checkbutton(
-            input_box,
-            text="双语字幕（当前行英文下方附中文译文，上/下一行仅英文）",
-            variable=self.bilingual_var,
-            style="Body.TLabel",
-            command=self._toggle_bilingual_ui,
-        ).grid(row=4, column=0, columnspan=3, sticky="w", pady=(0, 2))
+        # 双语字幕（主英附中）：中文来源三选一（关闭 / 中文翻译文件 / API 自动翻译）
+        bilingual_frame = ttk.Frame(input_box)
+        bilingual_frame.grid(row=4, column=0, columnspan=3, sticky="w", pady=(0, 2))
+        ttk.Label(bilingual_frame, text="双语字幕（当前行英文下附中文译文）：", style="Body.TLabel").pack(side="left")
+        ttk.Radiobutton(bilingual_frame, text="关闭", variable=self.zh_mode_var, value="off",
+                        command=self._toggle_bilingual_ui, style="Body.TLabel").pack(side="left", padx=(6, 0))
+        ttk.Radiobutton(bilingual_frame, text="中文翻译文件", variable=self.zh_mode_var, value="file",
+                        command=self._toggle_bilingual_ui, style="Body.TLabel").pack(side="left", padx=(6, 0))
+        ttk.Radiobutton(bilingual_frame, text="API 自动翻译", variable=self.zh_mode_var, value="api",
+                        command=self._toggle_bilingual_ui, style="Body.TLabel").pack(side="left", padx=(6, 0))
 
-        self.zh_lrc_label = ttk.Label(input_box, text="中文翻译文件（与英文逐行对应，可选）", style="Body.TLabel")
+        # 中文来源：中文翻译文件行
+        self.zh_lrc_label = ttk.Label(input_box, text="中文翻译文件（与英文逐行对应）", style="Body.TLabel")
         self.zh_lrc_entry = ttk.Entry(input_box, textvariable=self.zh_lrc_var)
         self.zh_lrc_button = ttk.Button(input_box, text="选择中文", style="Secondary.TButton", command=self.browse_zh_lrc)
         self.zh_lrc_label.grid(row=5, column=0, sticky="w", pady=(0, 6))
         self.zh_lrc_entry.grid(row=5, column=1, sticky="ew", padx=8, pady=(0, 6))
         self.zh_lrc_button.grid(row=5, column=2, sticky="ew", pady=(0, 6))
+
+        # 中文来源：API 自动翻译行（接口下拉 + API Key）
+        self.api_row = ttk.Frame(input_box)
+        self.api_row.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+        ttk.Label(self.api_row, text="翻译接口", style="Body.TLabel").pack(side="left")
+        self.zh_provider_combo = ttk.Combobox(self.api_row, textvariable=self.zh_provider_var,
+                                              state="readonly", width=10,
+                                              values=self.zh_provider_labels)
+        self.zh_provider_combo.pack(side="left", padx=(4, 12))
+        ttk.Label(self.api_row, text="API Key", style="Body.TLabel").pack(side="left")
+        self.zh_api_key_entry = ttk.Entry(self.api_row, textvariable=self.zh_api_key_var, show="*")
+        self.zh_api_key_entry.pack(side="left", fill="x", expand=True, padx=(4, 12))
+        ttk.Label(self.api_row, text="仅存本机，不随视频输出", style="Body.TLabel").pack(side="left")
+        self.zh_provider_var.set(self.zh_provider_labels[0] if self.zh_provider_labels else "DeepSeek")
+        self._toggle_bilingual_ui()  # 首次启动默认“关闭”：隐藏两种中文来源行
 
         # 第 3 步（独立设置音视频范围）
         clip_box = ttk.LabelFrame(parent, text="第 3 步：设置处理范围（音频与视频独立控制）", style="Section.TLabelframe", padding=14)
@@ -482,12 +505,38 @@ class VideoWorkbenchApp:
             self.append_log(f"已装载同步歌词文件：{path}")
 
     def _toggle_bilingual_ui(self):
-        show = self.bilingual_var.get()
-        for widget in (self.zh_lrc_label, self.zh_lrc_entry, self.zh_lrc_button):
-            if show:
+        mode = self.zh_mode_var.get()
+        if mode == "file":
+            for widget in (self.zh_lrc_label, self.zh_lrc_entry, self.zh_lrc_button):
                 widget.grid()
-            else:
+            self.api_row.grid_remove()
+        elif mode == "api":
+            self.api_row.grid()
+            for widget in (self.zh_lrc_label, self.zh_lrc_entry, self.zh_lrc_button):
                 widget.grid_remove()
+        else:
+            self.api_row.grid_remove()
+            for widget in (self.zh_lrc_label, self.zh_lrc_entry, self.zh_lrc_button):
+                widget.grid_remove()
+
+    def _current_provider_key(self):
+        label = self.zh_provider_var.get()
+        for key, cfg in lyric_translate.PROVIDERS.items():
+            if cfg["label"] == label:
+                return key
+        return "deepseek"
+
+    def _zh_lyrics_inputs(self):
+        """根据双语中文来源返回 (中文翻译文件路径, 翻译 API 配置)，未启用则 ('', None)。"""
+        mode = self.zh_mode_var.get()
+        if mode == "file":
+            return self.zh_lrc_var.get().strip(), None
+        if mode == "api":
+            api_key = self.zh_api_key_var.get().strip()
+            if api_key:
+                return "", {"provider": self._current_provider_key(), "api_key": api_key}
+            return "", None
+        return "", None
 
     def browse_zh_lrc(self):
         path = filedialog.askopenfilename(parent=self.root, filetypes=[
@@ -729,6 +778,7 @@ class VideoWorkbenchApp:
 
     def _run_single(self):
         try:
+            _zh_path, _zh_api = self._zh_lyrics_inputs()
             result = mode1_process(
                 self.video_var.get().strip(),
                 self.image_var.get().strip(),
@@ -744,7 +794,8 @@ class VideoWorkbenchApp:
                 video_end_time=self.video_end_var.get().strip(),
                 card_theme=self.card_theme_var.get(),
                 fix_lyric_overlap=self.fix_overlap_var.get(),
-                zh_lyrics_path=self.zh_lrc_var.get().strip() if self.bilingual_var.get() else "",
+                zh_lyrics_path=_zh_path,
+                zh_api_config=_zh_api,
             )
 
             output_anchor = result.video_output or result.audio_output or self.audio_var.get().strip()
@@ -763,6 +814,7 @@ class VideoWorkbenchApp:
             for index, job in enumerate(jobs, start=1):
                 self.root.after(0, lambda i=index, t=total_count: self.set_status(f"批量处理中：第 {i}/{t} 个任务。"))
                 self._worker_log(f"--- 第 {index}/{total_count} 个任务：{os.path.basename(job.source_path)} ---")
+                _zh_path, _zh_api = self._zh_lyrics_inputs()
                 result = mode1_process(
                     job.source_path,
                     self.image_var.get().strip(),
@@ -778,7 +830,8 @@ class VideoWorkbenchApp:
                     video_end_time=self.video_end_var.get().strip(),
                     card_theme=self.card_theme_var.get(),
                     fix_lyric_overlap=self.fix_overlap_var.get(),
-                    zh_lyrics_path=self.zh_lrc_var.get().strip() if self.bilingual_var.get() else "",
+                    zh_lyrics_path=_zh_path,
+                    zh_api_config=_zh_api,
                 )
                 if result.success:
                     success_count += 1
@@ -834,8 +887,17 @@ class VideoWorkbenchApp:
         self.card_theme_var.set(data.get("card_theme", DEFAULT_CARD_THEME))
         self.theme_combo.set(card_render.THEME_LABELS.get(self.card_theme_var.get(), "极简高级"))
         self.fix_overlap_var.set(data.get("fix_overlap", True))
-        self.bilingual_var.set(data.get("bilingual", False))
+        # 双语中文来源：优先读 zh_mode，兼容旧版 bilingual 布尔键
+        if "zh_mode" in data:
+            zh_mode = data.get("zh_mode", "off")
+        else:
+            zh_mode = "file" if data.get("bilingual", False) else "off"
+        self.zh_mode_var.set(zh_mode)
         self.zh_lrc_var.set(data.get("zh_lrc", ""))
+        _provider = data.get("zh_provider", "deepseek")
+        _label = lyric_translate.PROVIDERS.get(_provider, {}).get("label", "DeepSeek")
+        self.zh_provider_var.set(_label)
+        self.zh_api_key_var.set(data.get("zh_api_key", ""))
         self._toggle_bilingual_ui()
 
     def save_settings(self):
@@ -855,8 +917,10 @@ class VideoWorkbenchApp:
             "auto_open": self.auto_open_var.get(),
             "card_theme": self.card_theme_var.get(),
             "fix_overlap": self.fix_overlap_var.get(),
-            "bilingual": self.bilingual_var.get(),
+            "zh_mode": self.zh_mode_var.get(),
             "zh_lrc": self.zh_lrc_var.get().strip(),
+            "zh_provider": self._current_provider_key(),
+            "zh_api_key": self.zh_api_key_var.get().strip(),
         }
         try:
             with open(SETTINGS_FILE, "w", encoding="utf-8") as handle:
