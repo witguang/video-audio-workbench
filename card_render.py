@@ -449,13 +449,14 @@ def _resolve_overlap(lines: list) -> list:
     return out
 
 
-def _match_srt_timeline(plain_lines: list, plain_path: str) -> list:
-    """纯歌词行 -> 用同目录同名 SRT 的时间轴做逐行匹配（每行歌词 = 一个对齐单元）。
+def _match_srt_timeline(plain_lines: list, plain_path: str, srt_lines: list = None) -> list:
+    """纯歌词行 -> 用 SRT 的时间轴做逐行匹配（每行歌词 = 一个对齐单元）。
 
     背景：词级 SRT 字幕常带错词/空行/重叠时间，而 .plain 是干净的一行一句歌词。
     这里把 SRT 的时间轴嫁接到 plain 每行上，且严格以「一行 plain 歌词」为一个单元：
-    1. 同目录查找同主名的 .srt，把 plain 与 SRT 全文切分成 token 流做 LCS 全局对齐
-       （天然单调、正确处理重复段落），得到每行在 SRT 流里配对成功的 token 位置。
+    1. 用 SRT 时间轴（未传入时自动查找同主名 .srt），把 plain 与 SRT 全文切分成
+       token 流做 LCS 全局对齐（天然单调、正确处理重复段落），得到每行在 SRT 流里
+       配对成功的 token 位置。
     2. 只有配对置信度足够高的行才作为锚点（配对 token 数 / 行内 token 数 >= 0.5）。
        弱匹配的行（如 SRT 里根本没出现的歌词，只靠一两个常见词碰运气）视为空档，
        在最近两个锚点之间按 token 占比线性插值，防止它抢走相邻行真正对应的 cue。
@@ -463,15 +464,16 @@ def _match_srt_timeline(plain_lines: list, plain_path: str) -> list:
        时间，而不是整条 cue 的起点，避免整行提前或偏晚、相邻行被挤得太短。
     4. 起点强制单调递增；结尾统一取下一行起点（最后一行 +3.5s），保证同一时刻
        只有一行高亮、绝不重叠。
-    找不到配对 SRT 或完全无法匹配时，退化为均匀间隔（3.5s/行）。
+    找不到 SRT 或完全无法匹配时，退化为均匀间隔（3.5s/行）。
     """
-    dirname = os.path.dirname(os.path.abspath(plain_path))
-    base = os.path.splitext(os.path.basename(plain_path))[0]
-    srt_path = os.path.join(dirname, base + ".srt")
-    if not os.path.isfile(srt_path):
-        # 没有配对 SRT：退化为均匀间隔，保证纯歌词仍能渲染
-        return [(i * 3500, (i + 1) * 3500, text) for i, (_, _, text) in enumerate(plain_lines)]
-    srt_lines = _parse_srt(_read_text(srt_path))
+    if srt_lines is None:
+        dirname = os.path.dirname(os.path.abspath(plain_path))
+        base = os.path.splitext(os.path.basename(plain_path))[0]
+        srt_path = os.path.join(dirname, base + ".srt")
+        if not os.path.isfile(srt_path):
+            # 没有配对 SRT：退化为均匀间隔，保证纯歌词仍能渲染
+            return [(i * 3500, (i + 1) * 3500, text) for i, (_, _, text) in enumerate(plain_lines)]
+        srt_lines = _parse_srt(_read_text(srt_path))
     if not srt_lines:
         return [(i * 3500, (i + 1) * 3500, text) for i, (_, _, text) in enumerate(plain_lines)]
 
@@ -625,11 +627,28 @@ def _match_srt_timeline(plain_lines: list, plain_path: str) -> list:
             for i, (_, _, text) in enumerate(plain_lines)]
 
 
+def _prefer_plain_sibling(path: str, subtitle_lines: list) -> list:
+    """SRT/VTT 被选中时，若同目录存在同主名 .plain/.txt，以纯歌词文本和行为准。
+
+    用户选 .srt/.vtt 常常只是想要它的时间轴，而歌词文本可能错词、行切分也乱。
+    plain 才是干净正确的一行一句歌词。这里改用 plain 的行 + SRT 的时间轴，
+    让「无论选 .srt 还是 .plain，结果都是 plain 文本 + SRT 时间轴」。
+    """
+    base = os.path.splitext(path)[0]
+    for cand in (base + ".plain", base + ".txt"):
+        if os.path.isfile(cand):
+            plain_lines = _parse_plain(_read_text(cand))
+            if plain_lines:
+                return _match_srt_timeline(plain_lines, cand, srt_lines=subtitle_lines)
+    return subtitle_lines
+
+
 def _parse_lyrics(path: str, fix_overlap: bool = True) -> list:
     """按扩展名分发解析，统一返回 [(start_ms, end_ms, text), ...]。
 
     - LRC：时间轴来自 [mm:ss]，结尾用下一句起点推断。
-    - SRT / VTT：用字幕自带起止时间轴。
+    - SRT / VTT：用字幕自带起止时间轴；若同目录有同主名 .plain/.txt，
+      自动改为 plain 文本 + SRT 时间轴（见 _prefer_plain_sibling）。
     - plain / txt：无时间轴的纯歌词行，自动寻找同目录同名 .srt 做时间轴匹配。
     fix_overlap=True 时统一消除重叠（每行结尾不晚于下一行起点）。
     """
@@ -638,9 +657,9 @@ def _parse_lyrics(path: str, fix_overlap: bool = True) -> list:
         return []
     ext = os.path.splitext(path)[1].lower()
     if ext == ".vtt":
-        lines = _parse_vtt(content)
+        lines = _prefer_plain_sibling(path, _parse_vtt(content))
     elif ext == ".srt":
-        lines = _parse_srt(content)
+        lines = _prefer_plain_sibling(path, _parse_srt(content))
     elif ext == ".plain":
         lines = _parse_plain(content)
     else:

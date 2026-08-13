@@ -244,8 +244,13 @@ def mode1_process(
                 # B. 歌词(LRC/SRT/VTT/plain) -> ASS（当前行高亮、上一行压暗、淡入淡出）
                 if lrc_path and os.path.exists(lrc_path):
                     _emit(logger, f"正在解析歌词文件: {lrc_path}")
-                    if os.path.splitext(lrc_path)[1].lower() in (".plain", ".txt"):
+                    _lrc_ext = os.path.splitext(lrc_path)[1].lower()
+                    if _lrc_ext in (".plain", ".txt"):
                         _emit(logger, "纯歌词文件：将自动匹配同目录同名 SRT 的时间轴。")
+                    elif _lrc_ext in (".srt", ".vtt"):
+                        _lrc_base = os.path.splitext(lrc_path)[0]
+                        if any(os.path.isfile(_lrc_base + c) for c in (".plain", ".txt")):
+                            _emit(logger, "检测到同目录同名纯歌词(.plain)：以纯歌词文本和行为准，借用 SRT 时间轴对齐。")
                     if fix_lyric_overlap:
                         _emit(logger, "已启用：消除歌词时间重叠（相邻行自动截断）。")
                     temp_lyrics_ass = card_render.convert_lrc_to_ass(
