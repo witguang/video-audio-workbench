@@ -131,15 +131,58 @@ def _build_audio_command(video_path: str, audio_out: str, start_time: str, end_t
     ]
 
 
-def _build_full_audio_command(video_path: str, audio_out: str):
-    """提取未裁剪的完整音频，用于第一步无错对齐。"""
-    return [
-        "-y",
-        "-i", video_path,
-        "-vn",
-        "-c:a", "aac",
-        audio_out,
-    ]
+def _time_to_ms(value: str) -> int:
+    """把 'HH:MM:SS[.fff]' / 'MM:SS[.fff]' / 'SS[.fff]' 解析为毫秒；空/'End'/非法返回 0。"""
+    s = (value or "").strip()
+    if not s or s.lower() == "end":
+        return 0
+    s = s.replace(",", ".")
+    parts = s.split(":")
+    try:
+        if len(parts) == 3:
+            h, m, sec = int(parts[0]), int(parts[1]), float(parts[2])
+        elif len(parts) == 2:
+            h, m, sec = 0, int(parts[0]), float(parts[1])
+        else:
+            h, m, sec = 0, 0, float(parts[0])
+        return int((h * 3600 + m * 60 + sec) * 1000)
+    except (ValueError, IndexError):
+        return 0
+
+
+def _clip_range(video_start: str, video_end: str, audio_start: str, audio_end: str):
+    """确定统一处理范围（导出音频与卡片视频共用）。
+
+    视频范围未设置（默认整片 00:00:00~End）时，跟随音频范围——这样用户只填一个
+    范围（音频或视频），导出音频、字幕、视频就一起走同一段并保持同步，也不会白
+    渲染整首歌。返回 (clip_start, clip_end)。
+    """
+    v_start = (video_start or "").strip()
+    v_end = (video_end or "").strip()
+    if v_start in ("", "0", "00:00:00", "0:00:00") and v_end.lower() in ("", "end"):
+        return (audio_start or "").strip(), (audio_end or "").strip()
+    return v_start, v_end
+
+
+def _clip_duration_seconds(video_path: str, clip_start: str, clip_end: str,
+                           log: Optional[Callable[[str], None]]):
+    """计算剪辑范围时长（秒），作为渲染的硬性时长上限。
+
+    clip_end 为已知时间时直接相减；为 End/空时探测源视频总时长再减起点。
+    失败返回 None（调用方回退依赖 -shortest，仅可能有轻微尾帧过冲）。
+    """
+    start_ms = _time_to_ms(clip_start)
+    end_ms = _time_to_ms(clip_end)
+    if end_ms > 0:
+        return max(0.0, (end_ms - start_ms) / 1000.0)
+    try:
+        from ffmpeg_utils import probe_media_duration
+        total_s = probe_media_duration(video_path, log)
+        if total_s:
+            return max(0.0, total_s - start_ms / 1000.0)
+    except Exception as exc:
+        _emit(log, f"探测源视频时长失败（回退依赖 -shortest）: {exc}")
+    return None
 
 
 # ==================== 图像渲染模块 ====================
@@ -190,6 +233,12 @@ def mode1_process(
     fix_lyric_overlap=True,
     zh_lyrics_path="",
     zh_api_config=None,
+    orientation="landscape",
+    lyric_style="spotify",
+    quality_preset=card_render.DEFAULT_VIDEO_PRESET,
+    watermark_enabled=False,
+    watermark_text="",
+    watermark_position="bottom_right",
 ):
     video_path = video_path.strip()
     image_path = image_path.strip()
@@ -201,13 +250,17 @@ def mode1_process(
     video_end_time = video_end_time.strip()
     if card_theme not in card_render.THEMES:
         card_theme = DEFAULT_CARD_THEME
+    qcfg = card_render.VIDEO_PRESETS.get(quality_preset,
+                                         card_render.VIDEO_PRESETS[card_render.DEFAULT_VIDEO_PRESET])
+    # 滚动歌词文字持续移动、压缩效率低，叠加 CRF 加成以控制体积
+    crf = qcfg["crf"] + (card_render.SCROLL_CRF_BOOST if lyric_style == "scroll" else 0)
+    watermark_id = ""   # 数字指纹唯一 ID（启用水印时生成）
 
     temp_video_file_path = None
     temp_lyrics_ass = None
     temp_card_path = None
     temp_bg_path = None
-    temp_full_audio_path = None
-    temp_full_video_path = None
+    temp_clip_audio_path = None
 
     try:
         if not audio_out:
@@ -227,25 +280,44 @@ def mode1_process(
 
         _emit(logger, f"准备处理视频: {source_video_path}")
         _emit(logger, f"音频输出位置: {audio_out}")
-        
-        # 1. 正常提取并裁剪纯音频文件（满足前台“音频提取”的独立范围设置）
-        if not run_ffmpeg(_build_audio_command(source_video_path, audio_out, start_time, end_time), log=logger):
+
+        # 0. 统一处理范围：视频范围优先，未设时跟随音频范围。
+        #    导出音频 / 卡片视频 / 字幕共用同一段，只填一个即可保持同步。
+        eff_start, eff_end = _clip_range(video_start_time, video_end_time, start_time, end_time)
+
+        # 1. 提取并裁剪纯音频文件（统一范围，与视频/字幕严格同步）
+        if not run_ffmpeg(_build_audio_command(source_video_path, audio_out, eff_start, eff_end), log=logger):
             return ProcessResult(False, "音频提取失败。")
 
         # 2. 如果指定了图片，合成视频
         if image_path:
             if use_vinyl_mode:
                 theme_label = card_render.THEMES[card_theme]["label"]
-                _emit(logger, f"已启用：卡片歌词模式（主题：{theme_label}）。")
+                _orientation_label = "竖屏 1080×1920（9:16）" if orientation == "portrait" else "横屏 1920×1080（16:9）"
+                _lyric_style_label = "滚动歌词" if lyric_style == "scroll" else "三行高亮"
+                _emit(logger, f"已启用：卡片歌词模式（主题：{theme_label}，{_orientation_label}，歌词显示：{_lyric_style_label}）。")
 
-                # A. 提取完整长度音频流，作为歌词与封面的无错对齐基准
-                temp_full_audio_path = os.path.join(os.getcwd(), "temp_full_audio.aac")
-                _emit(logger, "正在提取完整长度音频流以进行字幕时间轴对齐...")
-                full_audio_cmd = _build_full_audio_command(source_video_path, temp_full_audio_path)
-                if not run_ffmpeg(full_audio_cmd, log=logger):
-                    return ProcessResult(False, "完整音频提取失败。")
+                # A. 确定视频剪辑范围：视频范围未设（默认整片）时跟随音频范围，
+                #    只渲染需要的一段，避免白渲染整首歌导致大范围时卡死
+                clip_start, clip_end = eff_start, eff_end
+                clip_ms = _time_to_ms(clip_start)
+                # 渲染时长硬上限：-shortest 在音频上混/重编码时会多出尾帧，
+                # 显式 -t 才能精确卡到所选范围（整片/End 时探测源视频总时长）
+                clip_dur_s = _clip_duration_seconds(source_video_path, clip_start, clip_end, logger)
+                if clip_dur_s:
+                    _emit(logger, f"渲染时长硬上限：{clip_dur_s:.2f}s")
+                _emit(logger, f"视频时间范围：{clip_start or '00:00:00'} ~ {clip_end or 'End'}"
+                              + (f"（字幕整体平移 {clip_start} → 相对 0 点）" if clip_ms else "（整片，字幕保持原时间轴）"))
 
-                # B. 歌词(LRC/SRT/VTT/plain) -> ASS（当前行高亮、上一行压暗、淡入淡出）
+                # B. 提取剪辑范围的音频作为视频基准（只提取需要的一段，速度快）
+                temp_clip_audio_path = os.path.join(os.getcwd(), "temp_clip_audio.aac")
+                _emit(logger, "正在提取所选时间范围的音频作为视频基准...")
+                if not run_ffmpeg(_build_audio_command(source_video_path, temp_clip_audio_path,
+                                                       clip_start, clip_end), log=logger):
+                    return ProcessResult(False, "视频范围音频提取失败。")
+
+                # C. 歌词(LRC/SRT/VTT/plain) -> ASS（当前行高亮、上一行压暗、淡入淡出）
+                #    字幕按 clip_start 整体平移，与截取后的音频对齐（spotify/scroll 均生效）
                 if lrc_path and os.path.exists(lrc_path):
                     _emit(logger, f"正在解析歌词文件: {lrc_path}")
                     _lrc_ext = os.path.splitext(lrc_path)[1].lower()
@@ -275,7 +347,8 @@ def mode1_process(
 
                         temp_lyrics_ass = card_render.convert_lrc_to_ass(
                             lrc_path, card_theme, fix_overlap=fix_lyric_overlap,
-                            zh_translate_fn=_translate_zh)
+                            zh_translate_fn=_translate_zh, orientation=orientation,
+                            lyric_style=lyric_style, time_offset_ms=clip_ms)
                     else:
                         if zh_lyrics_path:
                             if os.path.isfile(zh_lyrics_path):
@@ -285,7 +358,8 @@ def mode1_process(
                                 zh_lyrics_path = ""
                         temp_lyrics_ass = card_render.convert_lrc_to_ass(
                             lrc_path, card_theme, fix_overlap=fix_lyric_overlap,
-                            zh_path=zh_lyrics_path or None)
+                            zh_path=zh_lyrics_path or None, orientation=orientation,
+                            lyric_style=lyric_style, time_offset_ms=clip_ms)
                     if temp_lyrics_ass:
                         _emit(logger, "歌词解析并转换为 ASS 高亮字幕成功。")
                     else:
@@ -294,48 +368,53 @@ def mode1_process(
                 # C. 预渲染静态层（封面卡 + 排版 + 装饰）
                 _emit(logger, "正在预渲染封面卡片与排版层...")
                 temp_card_path = card_render.render_static_layer(
-                    image_path, os.path.basename(video_path), card_theme)
+                    image_path, os.path.basename(video_path), card_theme,
+                    orientation=orientation)
 
                 # D. 一次性合成静态背景（模糊+暗角+遮罩+卡片层只渲染一帧，大幅加速编码）
                 temp_bg_path = os.path.join(os.getcwd(), "temp_bg.png")
                 _emit(logger, "正在合成静态背景（仅渲染一帧，加速整体编码）...")
                 bg_cmd = card_render.build_background_command(
-                    image_path, temp_card_path, card_theme, temp_bg_path)
+                    image_path, temp_card_path, card_theme, temp_bg_path,
+                    orientation=orientation)
                 if not run_ffmpeg(bg_cmd, log=logger):
                     return ProcessResult(False, "静态背景合成失败。")
 
-                # E. 合成整首歌长度的视频（歌词与原歌曲完整对齐，不在此处做中间裁剪）
-                temp_full_video_path = os.path.join(os.getcwd(), "temp_full_video.mp4")
-                _emit(logger, "正在进行全时值高清歌词视频合成...")
+                # 数字指纹：生成唯一 ID，叠加可见水印（位置由 watermark_position 指定）
+                if watermark_enabled:
+                    watermark_id = card_render._watermark_id()
+                    card_render.apply_watermark(temp_bg_path, watermark_text, watermark_id,
+                                                position=watermark_position,
+                                                theme_key=card_theme, orientation=orientation)
+                    _emit(logger, f"已嵌入数字指纹 ID:{watermark_id}")
+
+                # E. 直接渲染最终视频：只渲染所选时间范围（字幕已按偏移对齐），
+                #    无需先合成整首歌再裁剪——大范围时从分钟级提速到秒级
+                _emit(logger, "正在渲染所选时间范围的歌词视频（仅渲染需要的一段，速度快）...")
+                # 不可见数字指纹：写入视频 metadata（ffprobe 可查，不破坏画面）。
+                # mp4 容器只保留标准键，故用 comment 存唯一 ID、copyright 存自定义文字。
+                md = []
+                if watermark_enabled and watermark_id:
+                    md.extend(["-metadata", f"comment=wm_id:{watermark_id}"])
+                    if watermark_text.strip():
+                        md.extend(["-metadata", f"copyright={watermark_text.strip()}"])
                 card_cmd = card_render.build_card_command(
-                    temp_full_audio_path, temp_bg_path,
-                    temp_lyrics_ass or "", card_theme, temp_full_video_path)
+                    temp_clip_audio_path, temp_bg_path,
+                    temp_lyrics_ass or "", card_theme, video_out,
+                    orientation=orientation, quality_preset=quality_preset,
+                    crf_override=crf, metadata=md or None, duration=clip_dur_s)
                 if not run_ffmpeg(card_cmd, log=logger):
-                    return ProcessResult(False, "完整视频合成失败。")
-                
-                # C. 二次精细剪切成品视频，完美同步画面、音轨和滚动歌词 [1]
-                _emit(logger, "正在根据设定的【视频裁剪范围】对成品视频进行二次精准剪切...")
-                trim_cmd = [
-                    "-y",
-                    "-ss", video_start_time,
-                ]
-                if video_end_time and video_end_time.lower() != "end":
-                    trim_cmd.extend(["-to", video_end_time])
-                    
-                trim_cmd.extend([
-                    "-i", temp_full_video_path,
-                    "-c:v", "libx264",
-                    "-preset", "ultrafast",  # 极速重编码，精准定位时间点到毫秒
-                    "-crf", str(card_render.VIDEO_CRF),
-                    "-c:a", "aac",
-                    "-b:a", card_render.AUDIO_BITRATE,
-                    "-ac", "2",
-                    "-aspect", "16:9",
-                    video_out
-                ])
-                
-                if not run_ffmpeg(trim_cmd, log=logger):
-                    return ProcessResult(False, "视频二次裁剪失败。")
+                    return ProcessResult(False, "视频合成失败。")
+
+                # 内容指纹登记：从最终成品视频的「内容本身」提取感知指纹，写入本地登记库。
+                # 即使盗版视频被重压/裁剪/去水印，日后仍可经「验证指纹」比对命中。
+                if watermark_enabled and watermark_id:
+                    try:
+                        import fingerprint
+                        fingerprint.register(video_out, watermark_id, os.path.basename(video_out))
+                        _emit(logger, f"内容指纹已登记 ID:{watermark_id}（日后可用「验证指纹」识别盗版副本）。")
+                    except Exception as exc:
+                        _emit(logger, f"内容指纹登记失败（不影响出片）: {exc}")
             else:
                 # 普通静态模式（不需要提取完整音频和二次裁剪，直接用前台已经裁剪好的音频单步组装即可）
                 static_cmd = _build_static_video_command(image_path, audio_out, video_out)
@@ -380,17 +459,10 @@ def mode1_process(
                 _emit(logger, "已清理临时静态背景图。")
             except OSError:
                 pass
-        # 自动清理后台提取的临时基准完整音频流
-        if temp_full_audio_path and os.path.exists(temp_full_audio_path):
+        # 自动清理临时剪辑范围音频
+        if temp_clip_audio_path and os.path.exists(temp_clip_audio_path):
             try:
-                os.remove(temp_full_audio_path)
-                _emit(logger, "已清理临时完整音频流。")
-            except OSError:
-                pass
-        # 自动清理临时生成的未裁剪完整视频
-        if temp_full_video_path and os.path.exists(temp_full_video_path):
-            try:
-                os.remove(temp_full_video_path)
-                _emit(logger, "已清理临时完整视频。")
+                os.remove(temp_clip_audio_path)
+                _emit(logger, "已清理临时剪辑范围音频。")
             except OSError:
                 pass

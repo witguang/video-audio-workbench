@@ -13,6 +13,7 @@
 
 import os
 import re
+import secrets
 from typing import Optional
 
 try:
@@ -22,6 +23,7 @@ except ImportError:  # pragma: no cover
     PIL_AVAILABLE = False
 
 CANVAS_W, CANVAS_H = 1920, 1080
+PORTRAIT_W, PORTRAIT_H = 1080, 1920
 
 FONT_REGULAR = r"C:/Windows/Fonts/msyh.ttc"
 FONT_BOLD = r"C:/Windows/Fonts/msyhbd.ttc"
@@ -29,11 +31,23 @@ FONT_BOLD = r"C:/Windows/Fonts/msyhbd.ttc"
 TEMP_CARD_PNG = "temp_card.png"
 TEMP_LYRICS_ASS = "temp_lyrics.ass"
 
-# ==================== 输出配置（轻量 h264 · 1080p30 · AAC 立体声） ====================
+# ==================== 输出配置（h264 · 1080p30 · AAC 立体声） ====================
 VIDEO_FPS = 30             # 输出帧率 1080p30
-VIDEO_PRESET = "veryfast"  # h264 档位：veryfast 比 medium 快 2-3 倍，文件略大
-VIDEO_CRF = 23             # 画质档：23 为标准档，比 17 快且体积小很多
 AUDIO_BITRATE = "160k"     # AAC 立体声音频码率
+
+# 输出画质预设（参考 HandBrake 内置预设）：档位越高 x264 preset 越慢、CRF 越小，
+# 画质越好、文件越大。preset 决定编码速度/压缩效率，crf 决定画质/体积。
+VIDEO_PRESETS = {
+    "Very Fast 1080p": {"preset": "veryfast", "crf": 24},  # 最快、文件最小、画质最低
+    "Fast 1080p":      {"preset": "faster",   "crf": 22},  # 默认：速度与画质均衡
+    "HQ 1080p":        {"preset": "medium",   "crf": 20},  # 高质量
+    "Super HQ 1080p":  {"preset": "slow",     "crf": 18},  # 最高质量、文件最大
+}
+DEFAULT_VIDEO_PRESET = "Fast 1080p"
+
+# 滚动歌词 CRF 加成：文字持续移动、压缩效率低（体积偏大），但人眼对移动文字的
+# 画质损失不敏感，故用更高 CRF（更低码率）抵消体积膨胀。仅滚动模式生效。
+SCROLL_CRF_BOOST = 3
 
 
 
@@ -51,7 +65,7 @@ THEMES = {
         "card_border": (255, 255, 255, 46),
         "card_shadow": (0, 0, 0, 150),
         "card_sheen": True,
-        "eyebrow": ("NOW PLAYING", 32, (185, 198, 218, 255), (960, 664), 12),
+        "eyebrow": ("", 32, (185, 198, 218, 255), (960, 664), 12),
         "title": {"size": 68, "color": (255, 255, 255, 255), "y": 738, "max_w": 1100},
         "divider": {"y": 694, "w": 96, "h": 3, "color": (240, 201, 135, 220)},
         "artist": {"size": 40, "color": (205, 213, 228, 255), "y": 800, "max_w": 1100},
@@ -71,7 +85,7 @@ THEMES = {
         "card_border": (255, 255, 255, 50),
         "card_shadow": (0, 0, 0, 160),
         "card_sheen": True,
-        "eyebrow": ("NOW PLAYING", 34, (170, 188, 224, 255), (940, 296), 14),
+        "eyebrow": ("", 34, (170, 188, 224, 255), (940, 296), 14),
         "title": {"size": 78, "color": (255, 255, 255, 255), "y": 350, "max_w": 860},
         "divider": {"y": 478, "w": 420, "h": 2, "color": (255, 255, 255, 60)},
         "artist": {"size": 44, "color": (211, 219, 232, 255), "y": 522, "max_w": 860},
@@ -89,7 +103,7 @@ THEMES = {
         "panel_radius": 48,
         "cover_size": 540,
         "cover_xy": (302, 275),
-        "eyebrow": ("NOW PLAYING", 32, (200, 228, 244, 255), (944, 340), 12),
+        "eyebrow": ("", 32, (200, 228, 244, 255), (944, 340), 12),
         "title": {"size": 66, "color": (255, 255, 255, 255), "y": 396, "max_w": 660},
         "divider": {"y": 486, "w": 300, "h": 2, "color": (159, 227, 255, 200)},
         "artist": {"size": 40, "color": (219, 230, 240, 255), "y": 524, "max_w": 660},
@@ -114,6 +128,76 @@ BILINGUAL_LAYOUT = {
 }
 # 中文译文颜色：88% 白（弱于英文纯白主歌词，形成主次层次）
 BILINGUAL_ZH_COLOR = "&HE0FFFFFF&"
+
+
+# ==================== 竖屏布局（1080x1920，9:16 适配手机） ====================
+# 竖屏画布比横屏高 1.78 倍：封面卡居中偏上，排版（歌名/歌手）居中，
+# 歌词放在下方 1/4 区域；三个主题保持各自视觉风格（无面板/蓝色 accent/玻璃面板），
+# 仅覆盖 THEMES 里的布局坐标，背景滤镜参数沿用横屏设置。
+_PORTRAIT_OVERRIDES = {
+    "minimal": {
+        "card_size": 650,
+        "card_xy": (215, 230),
+        "eyebrow": ("", 30, (185, 198, 218, 255), (540, 990), 12),
+        "title": {"size": 64, "color": (255, 255, 255, 255), "y": 1032, "max_w": 900},
+        "divider": {"y": 1110, "w": 96, "h": 3, "color": (240, 201, 135, 220)},
+        "artist": {"size": 40, "color": (205, 213, 228, 255), "y": 1152, "max_w": 900},
+        "lyrics_size": 52,
+        "lyrics_tracking": 2,
+        "lyrics_y": (1400, 1480, 1560),
+    },
+    "player": {
+        "card_size": 650,
+        "card_xy": (215, 230),
+        "eyebrow": ("", 32, (170, 188, 224, 255), (540, 990), 14),
+        "title": {"size": 70, "color": (255, 255, 255, 255), "y": 1032, "max_w": 900},
+        "divider": {"y": 1118, "w": 420, "h": 2, "color": (255, 255, 255, 60)},
+        "artist": {"size": 44, "color": (211, 219, 232, 255), "y": 1162, "max_w": 900},
+        "lyrics_size": 52,
+        "lyrics_tracking": 2,
+        "lyrics_y": (1400, 1480, 1560),
+    },
+    "glass": {
+        "panel_rect": (60, 150, 1020, 1900),
+        "panel_radius": 56,
+        "cover_size": 620,
+        "cover_xy": (230, 230),
+        "eyebrow": ("", 30, (200, 228, 244, 255), (540, 1000), 12),
+        "title": {"size": 62, "color": (255, 255, 255, 255), "y": 1042, "max_w": 840},
+        "divider": {"y": 1120, "w": 300, "h": 2, "color": (159, 227, 255, 200)},
+        "artist": {"size": 40, "color": (219, 230, 240, 255), "y": 1162, "max_w": 840},
+        "lyrics_size": 50,
+        "lyrics_tracking": 2,
+        "lyrics_y": (1400, 1475, 1550),
+    },
+}
+
+PORTRAIT_THEMES = {
+    key: {**THEMES[key], **overrides}
+    for key, overrides in _PORTRAIT_OVERRIDES.items()
+}
+
+# 竖屏双语（主英附中）：当前行英文+中文两行块，比竖屏单语更往上让位、行距拉开。
+PORTRAIT_BILINGUAL_LAYOUT = {
+    "minimal": {"lyrics_y": (1370, 1460, 1540), "lyrics_size": 46, "zh_size": 32},
+    "player":  {"lyrics_y": (1370, 1460, 1540), "lyrics_size": 46, "zh_size": 32},
+    "glass":   {"lyrics_y": (1370, 1455, 1530), "lyrics_size": 44, "zh_size": 30},
+}
+
+
+# ==================== 歌词滚动（参考主流播放器卡拉OK 滚动） ====================
+# 固定行距 + 变速连续滚动：歌词按固定行距 row_gap 排成整体，以「每行在自己 start
+# 时刻到达中心 y_center」为锚点连续向上滚。行距恒定（间距均匀），代价是滚动速度随
+# 歌词节奏变化——相邻歌词时间点 [start_j, start_{j+1}] 之间速度 = row_gap/Δt_j，
+# 快歌滚得快、间奏滚得慢，从而同时满足「间距均匀 + 音乐同步」。
+# libass 单事件只支持一个 \move（无法分段停顿），因此每行按相邻歌词时间点切成多段、
+# 每段一个 \move（段内匀速）。y_center/y_top/y_bottom 决定中心槽位与可见窗口（上下
+# 各显示几行），均指「英文行顶边」；事件用 \an8 顶部锚点。竖屏画布更高，带区相应
+# 下移。参数可在本表直接调节。
+SCROLL_LAYOUT = {
+    "landscape": {"y_center": 962, "row_gap": 70, "y_top": 838, "y_bottom": 1095},
+    "portrait":  {"y_center": 1462, "row_gap": 70, "y_top": 1338, "y_bottom": 1595},
+}
 
 
 # ==================== 基础工具 ====================
@@ -223,28 +307,42 @@ def _render_cover_card(cover: Image.Image, size: int, radius: int,
 
 # ==================== 静态层渲染 ====================
 
-def render_static_layer(image_path: str, filename: str, theme_key: str) -> str:
-    """渲染整张透明静态层（封面卡 + 排版 + 装饰），返回保存路径。"""
+def render_static_layer(image_path: str, filename: str, theme_key: str,
+                        orientation: str = "landscape") -> str:
+    """渲染整张透明静态层（封面卡 + 排版 + 装饰），返回保存路径。
+
+    orientation: "landscape"（1920x1080，默认）/"portrait"（1080x1920，竖屏）。
+    """
     if not PIL_AVAILABLE:
         raise RuntimeError("卡片模式需要 Pillow，请运行: pip install pillow")
-    cfg = THEMES[theme_key]
-    canvas = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
+    cfg = _theme_config(theme_key, orientation)
+    W, H = _canvas_size(orientation)
+    canvas = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(canvas)
     cover = Image.open(image_path).convert("RGB")
     title, artist = _split_title_artist(filename)
 
     if theme_key == "glass":
-        _render_glass(canvas, draw, cover, title, artist, cfg)
+        _render_glass(canvas, draw, cover, title, artist, cfg, orientation)
     else:
-        _render_card_layout(canvas, draw, cover, title, artist, cfg, theme_key)
+        _render_card_layout(canvas, draw, cover, title, artist, cfg, theme_key, orientation)
 
     path = os.path.join(os.getcwd(), TEMP_CARD_PNG)
     canvas.save(path, "PNG")
     return path
 
 
-def _render_card_layout(canvas, draw, cover, title, artist, cfg, theme_key):
-    """minimal / player：封面卡 + 右侧或居中排版。"""
+def _theme_config(theme_key: str, orientation: str) -> dict:
+    """按方向取主题布局：横屏 THEMES，竖屏 PORTRAIT_THEMES。"""
+    return THEMES[theme_key] if orientation == "landscape" else PORTRAIT_THEMES[theme_key]
+
+
+def _canvas_size(orientation: str):
+    return (CANVAS_W, CANVAS_H) if orientation == "landscape" else (PORTRAIT_W, PORTRAIT_H)
+
+
+def _render_card_layout(canvas, draw, cover, title, artist, cfg, theme_key, orientation):
+    """minimal / player：封面卡 + 居中排版（横屏 player 右对齐，竖屏全部居中）。"""
     size = cfg["card_size"]
     cx, cy = cfg["card_xy"]  # 封面卡左上角坐标
     card = _render_cover_card(cover, size, cfg["card_radius"], cfg["card_border"],
@@ -253,15 +351,16 @@ def _render_card_layout(canvas, draw, cover, title, artist, cfg, theme_key):
     margin = (card.width - size) // 2
     canvas.alpha_composite(card, (cx - margin, cy - margin))
 
-    # 排版（文字基线按主题配置）
+    # 排版（文字基线按主题配置）；横屏 player 右对齐，竖屏一律居中
+    anchor = "m" if orientation == "portrait" else ("l" if theme_key == "player" else "m")
     eb_text, eb_size, eb_color, eb_xy, eb_track = cfg["eyebrow"]
     draw2 = ImageDraw.Draw(canvas)
     _draw_tracked(draw2, eb_xy[0], eb_xy[1], eb_text, _font(False, eb_size),
-                  eb_color, tracking=eb_track, anchor_x="l" if theme_key == "player" else "m")
+                  eb_color, tracking=eb_track, anchor_x=anchor)
 
     # 装饰分割线
     div = cfg["divider"]
-    lx = eb_xy[0] - div["w"] / 2 if theme_key == "minimal" else eb_xy[0]
+    lx = eb_xy[0] - div["w"] / 2 if anchor == "m" else eb_xy[0]
     draw2.rounded_rectangle([lx, div["y"], lx + div["w"], div["y"] + div["h"]],
                             radius=div["h"] / 2, fill=div["color"])
 
@@ -269,19 +368,18 @@ def _render_card_layout(canvas, draw, cover, title, artist, cfg, theme_key):
     tfont = _fit_font(draw2, title, cfg["title"]["size"], cfg["title"]["max_w"], True)
     _draw_tracked(draw2, eb_xy[0], cfg["title"]["y"], title, tfont,
                   cfg["title"]["color"], tracking=1,
-                  shadow=(0, 0, 0, 190), anchor_x="l" if theme_key == "player" else "m")
+                  shadow=(0, 0, 0, 190), anchor_x=anchor)
 
     # 歌手（与标题同款柔和阴影，保证在明亮背景上也能看清）
     if artist:
         afont = _fit_font(draw2, artist, cfg["artist"]["size"], cfg["artist"]["max_w"], False)
         _draw_tracked(draw2, eb_xy[0], cfg["artist"]["y"], artist, afont,
                       cfg["artist"]["color"], tracking=1,
-                      shadow=(0, 0, 0, 190),
-                      anchor_x="l" if theme_key == "player" else "m")
+                      shadow=(0, 0, 0, 190), anchor_x=anchor)
 
 
-def _render_glass(canvas, draw, cover, title, artist, cfg):
-    """glass：整块磨砂玻璃面板 + 内部封面与排版。"""
+def _render_glass(canvas, draw, cover, title, artist, cfg, orientation):
+    """glass：整块磨砂玻璃面板 + 内部封面与排版（横屏左对齐，竖屏居中）。"""
     x0, y0, x1, y1 = cfg["panel_rect"]
     radius = cfg["panel_radius"]
 
@@ -301,25 +399,27 @@ def _render_glass(canvas, draw, cover, title, artist, cfg):
     margin = cover_img.width // 2 - csize // 2
     canvas.alpha_composite(cover_img, (ccx - margin, ccy - margin))
 
-    # 排版
+    # 排版（横屏左对齐，竖屏居中）
+    anchor = "m" if orientation == "portrait" else "l"
     eb_text, eb_size, eb_color, eb_xy, eb_track = cfg["eyebrow"]
     _draw_tracked(draw, eb_xy[0], eb_xy[1], eb_text, _font(False, eb_size),
-                  eb_color, tracking=eb_track, anchor_x="l")
+                  eb_color, tracking=eb_track, anchor_x=anchor)
 
     div = cfg["divider"]
-    draw.rounded_rectangle([eb_xy[0], div["y"], eb_xy[0] + div["w"], div["y"] + div["h"]],
+    lx = eb_xy[0] - div["w"] / 2 if anchor == "m" else eb_xy[0]
+    draw.rounded_rectangle([lx, div["y"], lx + div["w"], div["y"] + div["h"]],
                            radius=div["h"] / 2, fill=div["color"])
 
     tfont = _fit_font(draw, title, cfg["title"]["size"], cfg["title"]["max_w"], True)
     _draw_tracked(draw, eb_xy[0], cfg["title"]["y"], title, tfont,
                   cfg["title"]["color"], tracking=1,
-                  shadow=(0, 0, 0, 150), anchor_x="l")
+                  shadow=(0, 0, 0, 150), anchor_x=anchor)
 
     if artist:
         afont = _fit_font(draw, artist, cfg["artist"]["size"], cfg["artist"]["max_w"], False)
         _draw_tracked(draw, eb_xy[0], cfg["artist"]["y"], artist, afont,
                       cfg["artist"]["color"], tracking=1,
-                      shadow=(0, 0, 0, 150), anchor_x="l")
+                      shadow=(0, 0, 0, 150), anchor_x=anchor)
 
 
 # ==================== 歌词(LRC/SRT/VTT) -> ASS（Spotify 配色） ====================
@@ -724,8 +824,15 @@ def _ass_escape(text: str) -> str:
 
 def convert_lrc_to_ass(lrc_path: str, theme_key: str, fix_overlap: bool = True,
                        zh_path: str = None, zh_lines: list = None,
-                       zh_translate_fn: object = None) -> str:
+                       zh_translate_fn: object = None,
+                       orientation: str = "landscape",
+                       lyric_style: str = "spotify",
+                       time_offset_ms: int = 0) -> str:
     """歌词(LRC/SRT/VTT/plain) -> ASS（Spotify 配色逻辑）。
+
+    time_offset_ms：整体时间平移量（毫秒）。用于「只渲染所选时间范围」：
+    视频从原片第 N 秒开始截取时，把每行字幕时间整体减去 N（clamp ≥0），
+    使字幕与截取后的音视频对齐（原时间轴改为相对所选范围的 0 点）。
 
     同一时刻展示三行：上一行 / 当前行 / 下一行。
     当前行纯白高亮并略放大，上一行与下一行 45% 半透明白（灰感），带淡入淡出。
@@ -744,11 +851,22 @@ def convert_lrc_to_ass(lrc_path: str, theme_key: str, fix_overlap: bool = True,
     - zh_translate_fn：回调 ``fn(英文文本行列表) -> 中文行列表``，在解析出英文
       行后调用（如接入翻译 API）。回调抛异常会以 ValueError 向上传播。
     - zh_path：翻译文件路径，见上。
+
+    lyric_style：歌词显示方式，"spotify"（三行高亮，默认）/ "scroll"（连续滚动，
+    参考主流播放器卡拉OK 滚动：行从底部匀速滚向顶部，经过中心高亮带时变亮、滚出
+    后压暗，高亮以当前行活动窗口为准）。滚动模式位置带见 SCROLL_LAYOUT。
     """
-    cfg = THEMES[theme_key]
+    cfg = _theme_config(theme_key, orientation)
     lines = _parse_lyrics(lrc_path, fix_overlap=fix_overlap)
     if not lines:
         return ""
+
+    # 整体时间平移：所选范围从原片第 time_offset_ms 毫秒开始截取时，把每行字幕时间
+    # 减去该偏移（clamp ≥0），使字幕与截取后的音频对齐。spotify 与 scroll 两种样式
+    # 都消费 lines，因此在此统一平移即可同时生效。
+    if time_offset_ms:
+        lines = [(max(0, ms - time_offset_ms), max(0, end_ms - time_offset_ms), text)
+                 for ms, end_ms, text in lines]
 
     # 中文来源：直接列表 > 翻译回调 > 翻译文件，取首个非空来源进入双语模式
     zh_lines = list(zh_lines) if zh_lines else None
@@ -762,16 +880,19 @@ def convert_lrc_to_ass(lrc_path: str, theme_key: str, fix_overlap: bool = True,
     bilingual = bool(zh_lines)
 
     if bilingual:
-        bcfg = BILINGUAL_LAYOUT.get(theme_key, BILINGUAL_LAYOUT["minimal"])
+        blayout = BILINGUAL_LAYOUT if orientation == "landscape" else PORTRAIT_BILINGUAL_LAYOUT
+        bcfg = blayout.get(theme_key, blayout["minimal"])
         active_size = bcfg["lyrics_size"]
         zh_size = bcfg["zh_size"]
         prev_y, active_y, next_y = bcfg["lyrics_y"]
     else:
         active_size = cfg.get("lyrics_size", 54)
+        zh_size = int(active_size * 0.66)
         prev_y, active_y, next_y = cfg.get("lyrics_y", (868, 950, 1032))
     dim_size = max(active_size - 14, 28)
     tracking = cfg.get("lyrics_tracking", 2)
-    cx = CANVAS_W // 2
+    W, H = _canvas_size(orientation)
+    cx = W // 2
 
     style_active = (f"Active,Microsoft YaHei,{active_size},&H00FFFFFF,&H00FFFFFF,"
                     f"&H0C0C0C,&H64000000,1,0,0,0,100,100,{tracking},"
@@ -783,8 +904,8 @@ def convert_lrc_to_ass(lrc_path: str, theme_key: str, fix_overlap: bool = True,
     head = [
         "[Script Info]",
         "ScriptType: v4.00+",
-        f"PlayResX: {CANVAS_W}",
-        f"PlayResY: {CANVAS_H}",
+        f"PlayResX: {W}",
+        f"PlayResY: {H}",
         "ScaledBorderAndShadow: yes",
         "WrapStyle: 2",
         "",
@@ -797,34 +918,39 @@ def convert_lrc_to_ass(lrc_path: str, theme_key: str, fix_overlap: bool = True,
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
     ]
 
-    events = []
-    n = len(lines)
-    for i in range(n):
-        ms, end_ms, text = lines[i]
-        start_t, end_t = _fmt_ass(ms), _fmt_ass(end_ms)
-        safe = _ass_escape(text)
-        # 双语「主英附中」：当前行英文下方叠一行较小的中文译文（两行块整体居中）
-        if bilingual and i < len(zh_lines) and zh_lines[i]:
-            zh = _ass_escape(zh_lines[i])
-            active_text = f"{safe}\\N{{\\fs{zh_size}\\c{BILINGUAL_ZH_COLOR}}}{zh}"
-        else:
-            active_text = safe
-        # 当前行：纯白高亮
-        events.append(
-            f"Dialogue: 0,{start_t},{end_t},Active,,0,0,0,,"
-            f"{{\\an5\\pos({cx},{active_y})\\fad(280,260)}}{active_text}")
-        # 上一行：灰暗
-        if i > 0:
-            prev = _ass_escape(lines[i - 1][2])
+    if lyric_style == "scroll":
+        # 固定行距 + 变速连续滚动（间距均匀、音乐同步），见 _build_scroll_events 注释
+        events = _build_scroll_events(lines, cx, orientation, bilingual,
+                                      zh_lines, active_size, zh_size)
+    else:
+        events = []
+        n = len(lines)
+        for i in range(n):
+            ms, end_ms, text = lines[i]
+            start_t, end_t = _fmt_ass(ms), _fmt_ass(end_ms)
+            safe = _ass_escape(text)
+            # 双语「主英附中」：当前行英文下方叠一行较小的中文译文（两行块整体居中）
+            if bilingual and i < len(zh_lines) and zh_lines[i]:
+                zh = _ass_escape(zh_lines[i])
+                active_text = f"{safe}\\N{{\\fs{zh_size}\\c{BILINGUAL_ZH_COLOR}}}{zh}"
+            else:
+                active_text = safe
+            # 当前行：纯白高亮
             events.append(
-                f"Dialogue: 0,{start_t},{end_t},Dim,,0,0,0,,"
-                f"{{\\an5\\pos({cx},{prev_y})\\fad(380,360)}}{prev}")
-        # 下一行：灰暗
-        if i + 1 < n:
-            nxt = _ass_escape(lines[i + 1][2])
-            events.append(
-                f"Dialogue: 0,{start_t},{end_t},Dim,,0,0,0,,"
-                f"{{\\an5\\pos({cx},{next_y})\\fad(380,360)}}{nxt}")
+                f"Dialogue: 0,{start_t},{end_t},Active,,0,0,0,,"
+                f"{{\\an5\\pos({cx},{active_y})\\fad(280,260)}}{active_text}")
+            # 上一行：灰暗
+            if i > 0:
+                prev = _ass_escape(lines[i - 1][2])
+                events.append(
+                    f"Dialogue: 0,{start_t},{end_t},Dim,,0,0,0,,"
+                    f"{{\\an5\\pos({cx},{prev_y})\\fad(380,360)}}{prev}")
+            # 下一行：灰暗
+            if i + 1 < n:
+                nxt = _ass_escape(lines[i + 1][2])
+                events.append(
+                    f"Dialogue: 0,{start_t},{end_t},Dim,,0,0,0,,"
+                    f"{{\\an5\\pos({cx},{next_y})\\fad(380,360)}}{nxt}")
 
     path = os.path.join(os.getcwd(), TEMP_LYRICS_ASS)
     with open(path, "w", encoding="utf-8") as f:
@@ -832,21 +958,80 @@ def convert_lrc_to_ass(lrc_path: str, theme_key: str, fix_overlap: bool = True,
     return TEMP_LYRICS_ASS
 
 
+def _build_scroll_events(lines, cx, orientation, bilingual, zh_lines,
+                         active_size, zh_size) -> list:
+    """固定行距 + 变速连续滚动歌词事件（主流播放器卡拉OK 滚动观感）。
+
+    行距恒定（row_gap）、间距均匀；滚动速度随歌词节奏变化——相邻歌词时间点
+    [start_j, start_{j+1}] 之间速度 = row_gap/(start_{j+1}-start_j)，因此每行都在
+    自己的 start 时刻恰好经过中心 y_center（音乐同步），快歌滚得快、间奏滚得慢。
+    本机 ffmpeg 自带的 libass 0.17 只认 ``\\move``（位置动画）与行内恒定 ``\\1a``
+    （``\\t``/``\\fad`` 动画均不生效），且单事件只支持一个 ``\\move``，所以每行按
+    相邻歌词时间点切成多段、每段一个 ``\\move``（段内匀速）。行 i 在段
+    [start_j, start_{j+1}] 内从槽位 (i-j) 滚到 (i-j-1)，槽位 y = y_center + 槽位*row_gap，
+    槽位 0（中心）为高亮、双语整块纯白，其余槽位压暗。事件用 ``\\an8`` 顶部锚点，
+    y 值均指「英文行顶边」。
+    """
+    cfg = SCROLL_LAYOUT.get(orientation, SCROLL_LAYOUT["landscape"])
+    yc = cfg["y_center"]                       # 中心槽位（当前行英文顶边）
+    gap = cfg["row_gap"]                       # 固定行距 px
+    y_top = cfg["y_top"]                       # 可见窗口上边界
+    y_bottom = cfg["y_bottom"]                 # 可见窗口下边界
+
+    n = len(lines)
+    # 双语块（每行一个；压暗与高亮共用同一文本，仅亮度不同）
+    blocks = []
+    for idx, (ms, end_ms, text) in enumerate(lines):
+        safe = _ass_escape(text)
+        if bilingual and idx < len(zh_lines) and zh_lines[idx]:
+            zh = _ass_escape(zh_lines[idx])
+            blocks.append(f"{safe}\\N{{\\fs{zh_size}\\c{BILINGUAL_ZH_COLOR}}}{zh}")
+        else:
+            blocks.append(safe)
+
+    # 可见槽位范围：中心上/下各几行（槽位 0 = 中心）
+    n_top = max(0, int((yc - y_top) // gap))       # 上方可见行数
+    n_bottom = max(0, int((y_bottom - yc) // gap))  # 下方可见行数
+
+    events = []
+    for i in range(n):
+        # 行 i 的段 j 范围：从槽位 n_bottom（最下方）滚到槽位 -n_top-1（滚出窗口）
+        j_lo = max(0, i - n_bottom)
+        j_hi = min(n - 1, i + n_top)
+        for j in range(j_lo, j_hi + 1):
+            t_a = lines[j][0]
+            # 段终点：下一歌词行起点；最后一行没有下一行时用其自身结束时间收尾
+            t_b = lines[j + 1][0] if j + 1 < n else lines[j][1]
+            if t_b - t_a < 50:
+                continue
+            k = i - j                    # 槽位序号（0=中心，正=下方，负=上方）
+            y_a = yc + k * gap           # 段起点 y
+            y_b = yc + (k - 1) * gap     # 段终点 y（上移一行）
+            layer = 1 if k == 0 else 0   # 中心高亮，其余压暗
+            tag = "" if k == 0 else "\\1a&H73&"
+            events.append(
+                f"Dialogue: {layer},{_fmt_ass(t_a)},{_fmt_ass(t_b)},Active,,0,0,0,,"
+                f"{{\\an8\\move({cx},{y_a},{cx},{y_b}){tag}}}{blocks[i]}")
+    return events
+
+
 # ==================== ffmpeg 合成命令 ====================
 
 def build_background_command(image_path: str, static_png: str, theme_key: str,
-                             bg_png: str) -> list:
+                             bg_png: str, orientation: str = "landscape") -> list:
     """一次性合成「静态背景」PNG：模糊 + 色彩 + 暗角 + 上下渐隐 + 封面卡片层。
 
     背景是静态不变的，只需渲染一帧，避免编码阶段每一帧都重跑 gblur 等重滤镜，
     这是卡片模式提速的关键。输出为一张不透明白底 PNG（temp_bg.png）。
+    竖屏（portrait）时画布 1080x1920，渐隐遮罩位置随歌词区/排版区下移。
     """
-    cfg = THEMES[theme_key]
-    W, H = CANVAS_W, CANVAS_H
+    cfg = _theme_config(theme_key, orientation)
+    W, H = _canvas_size(orientation)
     blur, sat, bri = cfg["bg_blur"], cfg["bg_saturation"], cfg["bg_brightness"]
 
-    sy = int(H * 0.52)
-    ty = 300
+    # 底部渐隐起点（保证歌词可读）与顶部渐隐（压暗背景顶部让卡片/排版突出）
+    sy = 1370 if orientation == "portrait" else int(H * 0.52)
+    ty = 420 if orientation == "portrait" else 300
     filters = [
         # 背景：模糊 + 轻微色彩
         f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,crop={W}:{H},"
@@ -876,31 +1061,130 @@ def build_background_command(image_path: str, static_png: str, theme_key: str,
     ]
 
 
-def build_card_command(audio_path: str, bg_png: str,
-                       ass_file: str, theme_key: str, video_out: str) -> list:
-    """组装最终渲染命令：静态背景循环 + ASS 歌词 + 轻量 h264/AAC 输出。
+def _watermark_id() -> str:
+    """生成 8 位十六进制唯一指纹 ID（每次生成视频时调用）。"""
+    return secrets.token_hex(4)
 
-    背景已提前合成（见 build_background_command），编码阶段只有字幕叠加，
-    1080p30 veryfast 档位即可接近实时输出。
+
+# 可见水印位置：键 → GUI 标签（键存设置，标签用于界面展示）
+WATERMARK_POSITIONS = {
+    "bottom_right": "右下角",
+    "bottom_left": "左下角",
+    "top_right": "右上角",
+    "top_left": "左上角",
+    "below_title": "歌曲名下面",
+}
+WATERMARK_POSITION_LABELS = {label: key for key, label in WATERMARK_POSITIONS.items()}
+
+
+def _below_title_anchor(theme_key: str, orientation: str):
+    """返回「歌曲名下面」水印的 (x_center, y_top)。
+
+    水平对齐歌名锚点；垂直放在歌名（及歌手）文字块下方，避免与文字重叠。
     """
+    cfg = _theme_config(theme_key, orientation)
+    x = cfg["eyebrow"][3][0]  # 歌名水平锚点（横屏 player 为左对齐起点，其余为中线）
+    tf = _font(True, cfg["title"]["size"])
+    t_asc, t_desc = tf.getmetrics()
+    bottom = cfg["title"]["y"] + (t_asc + t_desc) / 2
+    artist = cfg.get("artist")
+    if artist and artist.get("y"):
+        af = _font(False, artist["size"])
+        a_asc, a_desc = af.getmetrics()
+        bottom = max(bottom, artist["y"] + (a_asc + a_desc) / 2)
+    return x, int(bottom) + 14
+
+
+def apply_watermark(bg_png: str, watermark_text: str, watermark_id: str,
+                    position: str = "bottom_right", theme_key: str = "minimal",
+                    orientation: str = "landscape") -> None:
+    """在背景 PNG 叠加半透明可见水印（自定义文字 + 唯一 ID）。
+
+    position 取 WATERMARK_POSITIONS 的键（四个角落或「歌曲名下面」）。
+    水印画在背景层（歌词在中间、水印在角落，不重叠）。半透明白字 + 淡阴影，
+    醒目但不喧宾夺主。watermark_text 为空时只显示 ID；两者都为空则跳过。
+    """
+    label = (watermark_text or "").strip()
+    if watermark_id:
+        label = (label + "  ") if label else ""
+        label += f"ID:{watermark_id}"
+    label = label.strip()
+    if not label or not PIL_AVAILABLE:
+        return
+    try:
+        img = Image.open(bg_png).convert("RGBA")
+    except Exception:
+        return
+    W, H = img.size
+    size = max(20, int(W * 0.022))   # 约 42px @1920 宽 / 24px @1080 宽
+    font = _font(False, size)
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    bbox = draw.textbbox((0, 0), label, font=font)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    margin = int(W * 0.02)
+
+    pos = position or "bottom_right"
+    if pos not in WATERMARK_POSITIONS:
+        pos = WATERMARK_POSITION_LABELS.get(pos, "bottom_right")
+
+    if pos == "below_title":
+        cx, y = _below_title_anchor(theme_key, orientation)
+        x = cx - tw / 2
+    else:
+        x = W - tw - margin if pos.endswith("_right") else margin
+        y = H - th - margin if pos.startswith("bottom") else margin
+
+    x, y = int(x), int(y)
+    draw.text((x + 2, y + 2), label, font=font, fill=(0, 0, 0, 130))   # 淡阴影
+    draw.text((x, y), label, font=font, fill=(255, 255, 255, 110))      # 半透明白
+    img = Image.alpha_composite(img, overlay)
+    img.convert("RGB").save(bg_png)
+
+
+def build_card_command(audio_path: str, bg_png: str,
+                       ass_file: str, theme_key: str, video_out: str,
+                       orientation: str = "landscape",
+                       quality_preset: str = DEFAULT_VIDEO_PRESET,
+                       crf_override: Optional[int] = None,
+                       metadata: Optional[list] = None,
+                       duration: Optional[float] = None) -> list:
+    """组装最终渲染命令：静态背景循环 + ASS 歌词 + h264/AAC 输出。
+
+    背景已提前合成（见 build_background_command），编码阶段只有字幕叠加。
+    画质由 quality_preset 决定（见 VIDEO_PRESETS，参考 HandBrake 内置预设）；
+    crf_override 非空时覆盖预设 CRF（用于滚动歌词等场景的码率加成）。
+    metadata 可选：追加的 ffmpeg 参数列表（如 ["-metadata", "comment=wm_id:..."]），
+    会在输出文件路径之前插入（写进最终成品，供内容指纹/溯源）。
+    duration 可选（秒）：显式时长硬上限。-shortest 在音频上混/重编码场景会多出
+    尾帧（过冲），叠加 -t 能把时长精确卡到剪辑范围，避免成片比音频长。
+    竖屏时画布为 1080x1920，显示比例取 9:16。
+    """
+    qcfg = VIDEO_PRESETS.get(quality_preset, VIDEO_PRESETS[DEFAULT_VIDEO_PRESET])
+    crf = crf_override if crf_override is not None else qcfg["crf"]
     filters = ([f"[1:v]ass={TEMP_LYRICS_ASS}[outv]"] if ass_file
                else ["[1:v]format=yuv420p[outv]"])
-    return [
+    cmd = [
         "-y",
-        "-i", audio_path,                       # input 0：完整基准音频
+        "-i", audio_path,                       # input 0：基准音频（所选时间范围）
         "-loop", "1", "-framerate", str(VIDEO_FPS), "-i", bg_png,   # input 1：静态背景
         "-filter_complex", ",".join(filters),
         "-map", "[outv]",
         "-map", "0:a",
         "-c:v", "libx264",
-        "-preset", VIDEO_PRESET,
-        "-crf", str(VIDEO_CRF),
+        "-preset", qcfg["preset"],
+        "-crf", str(crf),
         "-r", str(VIDEO_FPS),
         "-pix_fmt", "yuv420p",
         "-c:a", "aac",
         "-b:a", AUDIO_BITRATE,
         "-ac", "2",
-        "-aspect", "16:9",
-        "-shortest",
-        video_out,
+        "-aspect", "9:16" if orientation == "portrait" else "16:9",
     ]
+    if duration is not None and duration > 0:
+        cmd.extend(["-t", f"{duration:.6f}"])
+    cmd.append("-shortest")
+    if metadata:
+        cmd.extend(metadata)
+    cmd.append(video_out)
+    return cmd

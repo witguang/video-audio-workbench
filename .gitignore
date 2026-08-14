@@ -5,11 +5,23 @@ __pycache__/
 # 个人运行配置（含本机视频路径）
 app_settings.json
 
+# 内容指纹登记库（本地视频的指纹数据，不入库）
+fingerprint_registry.json
+
+# 视频号登录态（Cookie，约 7-30 天失效，需定期重新扫码；绝不入库）
+sph_storage_state*.json
+
+# 视频号发布页 DOM 调试转储（校准选择器用）
+sph_page_dump.txt
+
 # 历史归档（已被替代的旧版本，不入库）
 _archive/
 
 # IDE 配置
 .codeartsdoer/
+
+# Claude Code 本地权限配置（含本机路径，不入库）
+.claude/
 
 # 临时输出
 outputs/
