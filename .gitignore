@@ -23,6 +23,9 @@ _archive/
 # Claude Code 本地权限配置（含本机路径，不入库）
 .claude/
 
+# FFmpeg 二进制（约 180MB，超 GitHub 单文件限制，不入库；本地运行时放置到 ffmpeg/）
+ffmpeg/
+
 # 临时输出
 outputs/
 preview/

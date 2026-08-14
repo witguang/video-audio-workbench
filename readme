@@ -69,6 +69,12 @@
   VIDEO_FPS / VIDEO_PRESET / VIDEO_CRF / AUDIO_BITRATE 集中调整。
 - 卡片模式依赖 Pillow（见 requirements.txt）。
 
+FFmpeg 依赖：
+- 程序运行时需要 ffmpeg（ffmpeg_utils.get_ffmpeg_path() 优先查找项目 ffmpeg/ffmpeg.exe，其次系统 PATH）。
+- 因体积原因（约 180MB）ffmpeg.exe 不随仓库分发，请自行下载 Windows 版 ffmpeg
+  （如 https://www.gyan.dev/ffmpeg/builds/ 的 release-full build），把 ffmpeg.exe 放入
+  项目 ffmpeg/ 目录（与下方打包命令 ffmpeg/ffmpeg.exe 路径一致），或加入系统 PATH。
+
 运行方式：
   python workbench_app.py
 
@@ -77,7 +83,7 @@
   pyinstaller -F -w --add-binary "ffmpeg/ffmpeg.exe;ffmpeg" workbench_app.py
 
 说明：
-- 卡片歌词模式依赖 Pillow；普通静态视频模式不依赖（标准库 + 内置 ffmpeg/ffmpeg.exe）。
+- 卡片歌词模式依赖 Pillow；普通静态视频模式不依赖（标准库 + 项目 ffmpeg/ 目录下的 ffmpeg.exe，见上）。
 - create_shortcut.py 仅在需要修复 logo.ico 图标格式时用到 Pillow。
 - 配置保存在 app_settings.json（个人本机路径，不入库）。
 - 历史版本的 main_gui.py、update_project.py、mode1_ffmpeg copy.py 已归档至 _archive/。
