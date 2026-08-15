@@ -43,6 +43,25 @@ _UPLOAD_TIMEOUT_MS = 180_000
 _NAV_TIMEOUT_MS = 60_000
 # 全自动点击「发表」后等待成功提示
 _PUBLISH_TIMEOUT_MS = 120_000
+# 发布弹窗表单渲染等待：上传同时即可填表，只需等表单出现（不等转码完成）
+_FORM_TIMEOUT_MS = 15_000
+
+# 发布页会自动播放视频预览，很吵；静音所有 <video>/<audio>（muted 后照常播放只是无声）
+_MUTE_MEDIA_JS = r"""
+(() => {
+  const muteAll = () => {
+    document.querySelectorAll('video,audio').forEach(el => { el.muted = true; });
+  };
+  muteAll();
+  new MutationObserver(muteAll).observe(document.documentElement, {childList: true, subtree: true});
+  document.addEventListener('DOMContentLoaded', muteAll);
+  const origPlay = HTMLMediaElement.prototype.play;
+  HTMLMediaElement.prototype.play = function () {
+    this.muted = true;
+    return origPlay.apply(this, arguments);
+  };
+})();
+"""
 
 
 class SphError(Exception):
@@ -147,7 +166,9 @@ def _get_playwright():
 
 def _launch_browser(p, headless: bool, log_cb):
     """启动浏览器：优先系统 Chrome（风控更友好），失败回退自带 Chromium。"""
-    args = ["--disable-blink-features=AutomationControlled"]
+    # --mute-audio：整个自动化浏览器静音（发布页会自动预览播放视频，很吵）。
+    # 浏览器级静音比 JS 静音可靠（页面播放器初始化可能把 muted 改回 false）。
+    args = ["--disable-blink-features=AutomationControlled", "--mute-audio"]
     try:
         return p.chromium.launch(channel="chrome", headless=headless, args=args)
     except Exception as exc:  # 系统 Chrome 不可用（未装/路径异常）时回退
@@ -167,6 +188,8 @@ def _new_context(browser, cookie_path: str):
     context = browser.new_context(**ctx_opts)
     # 屏蔽自动化标记，降低被识别为机器人的概率
     context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+    # 静音所有媒体元素：发布页会自动预览播放视频，很吵（muted 后照常播放只是无声）
+    context.add_init_script(_MUTE_MEDIA_JS)
     return context
 
 
@@ -350,17 +373,32 @@ def _click_first_dropdown_option(page, start_index: int = 0) -> bool:
     return False
 
 
-def _dismiss_blocking_dialog(page, log_cb) -> bool:
-    """关闭当前可能出现的拦截弹窗（如草稿确认框「是否保留此次编辑」）。
+def _dismiss_blocking_dialog(page, log_cb, prefer_save: bool = False) -> bool:
+    """关闭当前可能出现的拦截弹窗（草稿确认框「将此次编辑保留？」）。
 
     这类弹窗盖在表单上方，会让后续点击「元素可见但被拦截」而超时。
-    优先点非破坏性的「取消/不保存/关闭」，避免影响已填写的表单。返回是否关掉了弹窗。
+    只认**草稿确认类**弹窗（文案含「保留/草稿/不保存」），不碰业务弹窗
+    （声明原创窗口等也是 [role='dialog']，绝不能误关）。
+    prefer_save=False（填表进行中/等待上传）：先按 Escape 或点「取消/关闭」关掉弹窗并留在
+        当前页——**不点「保存」**（那会跳转到草稿箱、中断后续填表），也**不点「不保存/放弃」**
+        （那会清空已填表单、页面复位反复抽搐，即用户反馈的「上下滚动抽搐」根因）。
+    prefer_save=True（流程结束，semi 空闲等待）：点「保存」把编辑存进草稿箱。
+    返回是否关掉了弹窗。
     """
     dlg = None
     try:
         for el in page.locator("[class*='weui-desktop-dialog'], .common-dialog, [role='dialog']").all():
             try:
-                if el.is_visible(timeout=500):
+                if not el.is_visible(timeout=500):
+                    continue
+                # 关键：只把「草稿确认框」当拦截层。声明原创等业务弹窗虽然也匹配
+                # [role='dialog']，但它们是我们要操作的对象，不能 Escape/关闭。
+                txt = ""
+                try:
+                    txt = el.inner_text(timeout=1_000)
+                except Exception:
+                    pass
+                if any(k in txt for k in ("保留", "草稿", "不保存")):
                     dlg = el
                     break
             except Exception:
@@ -370,12 +408,37 @@ def _dismiss_blocking_dialog(page, log_cb) -> bool:
     if dlg is None:
         return False
 
-    for btn_text in ("取消", "不保存", "关闭", "知道了"):
+    # 流程结束：点「保存」把编辑存进草稿箱
+    # 必须 exact=True：「保存」会子串匹配「不保存」按钮，.last 可能点到丢弃编辑的那个
+    if prefer_save:
+        try:
+            btn = dlg.get_by_role("button", name="保存", exact=True).last
+            if btn.is_visible(timeout=600):
+                btn.click()
+                page.wait_for_timeout(400)
+                if log_cb:
+                    log_cb("已点击「保存」，编辑已存入草稿箱。")
+                return True
+        except Exception:
+            pass
+
+    # 填表进行中：先 Escape 关掉（留在当前页，不跳转草稿箱），再试「取消/关闭」
+    try:
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(300)
+        try:
+            if not dlg.is_visible(timeout=300):
+                return True
+        except Exception:
+            return True  # 弹窗已消失，视为关闭成功
+    except Exception:
+        pass
+    for btn_text in ("取消", "关闭", "知道了"):
         try:
             btn = dlg.get_by_role("button", name=btn_text, exact=False).last
             if btn.is_visible(timeout=600):
                 btn.click()
-                page.wait_for_timeout(400)
+                page.wait_for_timeout(300)
                 if log_cb:
                     log_cb(f"已关闭拦截弹窗（点击「{btn_text}」）。")
                 return True
@@ -396,6 +459,35 @@ def _dismiss_blocking_dialog(page, log_cb) -> bool:
     if log_cb:
         log_cb("发现拦截弹窗但未找到可关闭按钮，跳过。")
     return False
+
+
+def _active_wait(page, ms: int, log_cb=None) -> None:
+    """等待 ms 毫秒，期间保持页面「活跃」并随手关闭「将此次编辑保留」弹窗。
+
+    视频号发布页在空闲（无鼠标/键盘交互）时会弹出「将此次编辑保留」拦截弹窗，
+    盖在表单上导致后续点选超时——用户实测在「添加到合集/声明原创」操作途中
+    弹窗打断填写。所有填表/点选步骤之间的等待一律用它：每 ~1s 轻移鼠标
+    （mousemove 不产生点击副作用）让页面以为用户在场、弹窗不出现；万一出现
+    立即关闭（Escape/取消，不点「保存」——那会跳草稿箱中断流程）。等全部
+    操作完成、进入 semi 空闲循环后，才允许弹窗出现并点「保存」存草稿。
+    """
+    deadline = time.time() + ms / 1000.0
+    tick = 0
+    while time.time() < deadline:
+        tick += 1
+        if tick % 2 == 0:
+            try:
+                page.mouse.move(30 + (tick * 7) % 60, 40 + (tick * 13) % 40)
+            except Exception:
+                pass
+        try:
+            _dismiss_blocking_dialog(page, log_cb)
+        except Exception:
+            pass
+        remain_ms = int((deadline - time.time()) * 1000)
+        if remain_ms <= 0:
+            break
+        page.wait_for_timeout(min(1_000, remain_ms))
 
 
 def _fill_short_title(page, short_title: str, log_cb):
@@ -420,6 +512,8 @@ def _select_collection(page, name: str, log_cb):
     if not name:
         return
     try:
+        # 0) 先关掉可能出现的拦截弹窗，避免下拉触发器被盖住点击超时
+        _dismiss_blocking_dialog(page, log_cb)
         # 1) 打开合集下拉。触发器是 <div class="display-text">选择合集</div>（点击后才出现选项）；
         #    注意「添加到合集」只是 label（<div class="label">），点了不会打开下拉。
         opened = False
@@ -440,15 +534,16 @@ def _select_collection(page, name: str, log_cb):
             if log_cb:
                 log_cb("未找到合集下拉触发器，跳过。")
             return
-        page.wait_for_timeout(1_500)  # 等下拉选项渲染
+        _active_wait(page, 1_500, log_cb)  # 等下拉选项渲染（保持活跃+关拦截弹窗）
 
         # 2) 点选目标合集（不搜索——下拉选项是按钮，直接列出；
         #    遍历所有匹配、点第一个可见的，避免 .first 命中隐藏重复节点）
+        _dismiss_blocking_dialog(page, log_cb)  # 点击前再关一次，防止弹窗盖住选项
         clicked = _click_first_visible(page, page.get_by_text(name, exact=False))
         # 3) 兜底：点下拉里第一个可见选项按钮
         if not clicked:
             clicked = _click_first_dropdown_option(page)
-        page.wait_for_timeout(500)
+        _active_wait(page, 500, log_cb)
         if clicked:
             if log_cb:
                 log_cb(f"已添加到合集：{name}")
@@ -469,6 +564,8 @@ def _select_location(page, log_cb):
     选完会读回显示值核实真正选中了什么；误选会自动重试。
     """
     try:
+        # 0) 先关掉可能出现的拦截弹窗，避免位置行被盖住点击超时
+        _dismiss_blocking_dialog(page, log_cb)
         # 1) 打开位置下拉：点「位置」label 所在行里的 .display-text；没有则点 label 本身
         label = page.locator("div.label", has_text="位置").first
         if not label.is_visible(timeout=3_000):
@@ -492,9 +589,10 @@ def _select_location(page, log_cb):
                 label.click()
         except Exception:
             label.click()
-        page.wait_for_timeout(1_500)  # 等下拉选项渲染
+        _active_wait(page, 1_500, log_cb)  # 等下拉选项渲染（保持活跃+关拦截弹窗）
 
         # 2) 优先精确匹配「不显示位置」（遍历点第一个可见的，避免 .first 命中隐藏重复节点）
+        _dismiss_blocking_dialog(page, log_cb)  # 点击前再关一次，防止弹窗盖住选项
         clicked = _click_first_visible(page, page.get_by_text("不显示位置", exact=False))
         if not clicked:
             clicked = _click_first_visible(page, page.get_by_text("不显示位置", exact=True))
@@ -502,7 +600,7 @@ def _select_location(page, log_cb):
         #    所以第一项就是「不显示位置」，不再跳过第一项（上次 start_index=1 点到了第二项=别的城市）
         if not clicked:
             clicked = _click_first_dropdown_option(page, start_index=0)
-        page.wait_for_timeout(500)
+        _active_wait(page, 500, log_cb)
 
         if not clicked:
             if log_cb:
@@ -523,9 +621,10 @@ def _select_location(page, log_cb):
             trigger = display.first
             if trigger.is_visible(timeout=2_000):
                 trigger.click()
-                page.wait_for_timeout(800)
+                _active_wait(page, 800, log_cb)
+                _dismiss_blocking_dialog(page, log_cb)
                 _click_first_visible(page, page.get_by_text("不显示位置", exact=False))
-                page.wait_for_timeout(500)
+                _active_wait(page, 500, log_cb)
                 actual = _read_display()
                 if "不显示位置" in actual:
                     if log_cb:
@@ -562,7 +661,7 @@ def _declare_original(page, log_cb):
             if log_cb:
                 log_cb(f"「声明原创」选择框点击失败（可能未启用）：{exc}")
             return
-        page.wait_for_timeout(1_500)
+        _active_wait(page, 1_500, log_cb)  # 等声明弹窗渲染（保持活跃+关拦截弹窗）
 
         # 2) 弹窗内勾选「我已阅读并…」；找不到则回退勾选任意 ant-checkbox
         checked = False
@@ -570,7 +669,7 @@ def _declare_original(page, log_cb):
             agree = page.locator("label.ant-checkbox-wrapper", has_text="我已阅读并").first
             if agree.is_visible(timeout=3_000):
                 agree.click()
-                page.wait_for_timeout(500)
+                _active_wait(page, 500, log_cb)
                 checked = True
         except Exception:
             pass
@@ -579,19 +678,20 @@ def _declare_original(page, log_cb):
                 try:
                     if c.is_visible() and not c.is_checked():
                         c.click()
-                        page.wait_for_timeout(500)
+                        _active_wait(page, 500, log_cb)
                         checked = True
                         break
                 except Exception:
                     continue
 
         # 3) 确认：弹窗内「声明原创」按钮（或 确定/确认/同意）
+        _dismiss_blocking_dialog(page, log_cb)  # 点击前再关一次，防止「将此次编辑保留」盖住确认按钮
         for label in ("声明原创", "确定", "确认", "同意"):
             try:
                 b = page.get_by_role("button", name=label).last
                 if b.is_visible(timeout=1_500):
                     b.click()
-                    page.wait_for_timeout(500)
+                    _active_wait(page, 500, log_cb)
                     if log_cb:
                         log_cb(f"已声明原创（{label}确认）。")
                     return
@@ -602,6 +702,26 @@ def _declare_original(page, log_cb):
     except Exception as exc:
         if log_cb:
             log_cb(f"声明原创处理失败（跳过）：{exc}")
+
+
+def _wait_upload_done(page, log_cb, timeout_ms: int = _UPLOAD_TIMEOUT_MS) -> bool:
+    """等待上传完成（视频预览出现）。期间每 ~2s 轻移鼠标保持页面「活跃」，避免页面因
+    空闲弹出「将此次编辑保留」弹窗；若弹窗仍出现，用 Escape 关闭（留在当前页，不点
+    「保存」——那会跳转草稿箱，导致合集/声明原创来不及填）。
+
+    返回是否在超时内上传完成。单独抽出是因为：合集/声明原创字段、以及 auto 模式的
+    「发表」按钮都要求上传完成才可用。
+    """
+    deadline = time.time() + timeout_ms / 1000.0
+    while time.time() < deadline:
+        try:
+            if page.locator(SEL_VIDEO_PREVIEW).first.is_visible(timeout=800):
+                return True
+        except Exception:
+            pass
+        # 保持页面活跃 + 关闭拦截弹窗（与 _active_wait 同一套逻辑）
+        _active_wait(page, 1_000, log_cb)
+    return False
 
 
 def publish(video_path: str,
@@ -685,12 +805,14 @@ def publish(video_path: str,
                 raise SelectorNotFoundError(
                     f"未找到文件上传框({SEL_FILE_INPUT})：{exc}。平台可能改版。") from exc
             if log_cb:
-                log_cb("视频上传中，请等待转码完成…")
+                log_cb("视频上传中（后台转码），同时开始填写信息…")
+
+            # 表单字段在上传同时即可填写：只需等表单渲染（短超时），不等上传/转码完成
             try:
-                page.wait_for_selector(SEL_VIDEO_PREVIEW, timeout=_UPLOAD_TIMEOUT_MS)
+                page.wait_for_selector(SEL_DESC_EDITOR, timeout=_FORM_TIMEOUT_MS)
             except Exception:
-                page.wait_for_timeout(10_000)  # 无 video 预览则保守等待
-            page.wait_for_timeout(2_000)
+                _active_wait(page, 2_000, log_cb)  # 表单未及时出现则稍等
+            _active_wait(page, 500, log_cb)
 
             # 填视频描述（文案 = output_field）
             if not _fill_near_label(page, ("视频描述", "描述"), fields.description, log_cb, label_hint="视频描述"):
@@ -715,12 +837,29 @@ def publish(video_path: str,
             # 位置（规格：不显示位置）
             _select_location(page, log_cb)
 
-            # 添加到合集
-            _select_collection(page, collection, log_cb)
+            # 填完核心字段立即通知 GUI（提示音+弹窗），不等上传/转码完成——避免提示迟到
+            if not headless:
+                if log_cb:
+                    log_cb("视频信息已填写，正在后台上传/转码…")
+                if on_ready:
+                    on_ready()
 
-            # 声明原创（含弹窗确认）
-            if declare_original:
-                _declare_original(page, log_cb)
+            # 合集 / 声明原创字段在上传完成后才渲染；这里才等上传完成（期间自动处理
+            # 「将此次编辑保留」弹窗，避免等待时编辑被丢弃/页面抽搐）。超时则跳过（非必填）。
+            upload_done = _wait_upload_done(page, log_cb)
+            if upload_done:
+                _active_wait(page, 500, log_cb)
+                # 添加到合集
+                _select_collection(page, collection, log_cb)
+                # 声明原创（含弹窗确认）
+                if declare_original:
+                    _declare_original(page, log_cb)
+            else:
+                if headless:
+                    raise SphError(
+                        f"视频上传超时（超过 {_UPLOAD_TIMEOUT_MS // 1000} 秒仍未出现视频预览），未发表。")
+                if log_cb:
+                    log_cb("上传未在超时内完成，已跳过「添加到合集/声明原创」（可在浏览器手动补充）。")
 
             # 链接 / 活动 / 定时发表 / 视频标注：按用户规格保持默认不操作
 
@@ -728,12 +867,15 @@ def publish(video_path: str,
 
             if not headless:
                 if log_cb:
-                    log_cb("已填写完成。请在浏览器中手动点击「发表」完成发布，关闭窗口后脚本结束。")
-                if on_ready:
-                    on_ready()
-                # 保持浏览器存活直到用户关闭窗口
+                    log_cb("请在浏览器中手动点击「发表」完成发布，关闭窗口后脚本结束。")
+                # 保持浏览器存活直到用户关闭窗口；此时填表已全部完成，若空闲弹出
+                # 「将此次编辑保留」，点「保存」把编辑存进草稿箱（不点会反复弹、页面抽搐）
                 while browser.is_connected():
-                    time.sleep(1)
+                    try:
+                        _dismiss_blocking_dialog(page, log_cb, prefer_save=True)
+                    except Exception:
+                        pass
+                    time.sleep(3)
                 if log_cb:
                     log_cb("浏览器已关闭，半自动发布流程结束。")
             else:

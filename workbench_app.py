@@ -4,6 +4,10 @@ import os
 import re
 import threading
 import traceback
+try:
+    import winsound  # Windows 系统提示音（完成弹窗）
+except ImportError:  # 非 Windows 环境
+    winsound = None
 import tkinter as tk
 from dataclasses import dataclass
 from tkinter import filedialog, messagebox, ttk
@@ -37,6 +41,15 @@ VIDEO_FILE_TYPES = [
 MODE_LOCAL_FILE = "本地电脑直处理"
 MODE_LOCAL_FOLDER = "本地文件夹批量"
 MODE_R2_URL = "R2 URL 下载后处理"
+
+
+def _completion_beep():
+    """「完成」弹窗提示音：Windows 系统默认提示音。失败静默（非关键功能）。"""
+    try:
+        if winsound is not None:
+            winsound.MessageBeep()
+    except Exception:
+        pass
 
 MODE_CONFIG = {
     MODE_LOCAL_FILE: {
@@ -656,14 +669,25 @@ class VideoWorkbenchApp:
         threading.Thread(target=self._sph_publish_worker,
                          args=(video_path, fields, mode), daemon=True).start()
 
+    def _raise_window(self):
+        """把工作台窗口提到前台（避免完成弹窗被浏览器窗口挡住）。"""
+        try:
+            self.root.lift()
+            self.root.attributes("-topmost", True)
+            self.root.after(150, lambda: self.root.attributes("-topmost", False))
+        except Exception:
+            pass
+
     def _sph_on_ready(self):
-        """semi 模式填完表单瞬间（worker 线程内）回调：跳回 GUI 线程弹提示并恢复按钮。"""
+        """semi 模式填完核心字段瞬间（worker 线程内）回调：跳回 GUI 线程恢复按钮/状态。
+
+        ⚠️ 这里**不弹模态窗、不抢焦点**——模态弹窗把焦点从浏览器抢走后，视频号页面
+        会立刻弹出「将此次编辑保留」，中断后续「合集/声明原创」填写（用户实测反馈）。
+        完成弹窗统一在流程结束（浏览器关闭）时由 _sph_finish 弹。
+        """
         self.root.after(0, lambda: (
             self._set_sph_busy(False),
-            self.set_busy(False, "等待你在浏览器中点击「发表」…"),
-            messagebox.showinfo("发布到视频号",
-                                "已完成登录/上传/填文案。\n请在弹出的浏览器窗口中手动点击「发表」完成发布，"
-                                "关闭窗口后流程结束。")))
+            self.set_busy(False, "视频信息已填写，正在后台上传/转码…")))
 
     def _sph_publish_worker(self, video_path, fields, mode):
         try:
@@ -711,9 +735,18 @@ class VideoWorkbenchApp:
         self.set_busy(False, "就绪" if ok else "发布/登录失败")
         if ok:
             if mode == "auto":
+                self._raise_window()
+                _completion_beep()
                 messagebox.showinfo("发布到视频号", "已自动点击「发表」，发布完成。")
-            # semi 模式成功时不重复弹窗（提示已在 _sph_on_ready 弹出）
+            else:
+                # semi 模式：浏览器关闭/流程结束时统一弹完成窗 + 提示音
+                self._raise_window()
+                _completion_beep()
+                messagebox.showinfo("发布到视频号",
+                                    "发布流程已结束。\n"
+                                    "若已点击「发表」，视频已发布；若未点击，编辑已自动保存到草稿箱。")
         else:
+            self._raise_window()
             messagebox.showerror("发布到视频号失败", err)
 
     def _on_theme_selected(self):
@@ -763,6 +796,7 @@ class VideoWorkbenchApp:
             for r in (result.get("results") or [])[:5]:
                 self._worker_log(
                     f"  · ID:{r.get('wm_id') or '?'} 音频相似 {r['audio_score']:.2f} / 视频相似 {r['video_score']:.2f}")
+            _completion_beep()
             messagebox.showinfo("指纹验证结果", reason)
             return
         best = result["best"]
@@ -770,6 +804,7 @@ class VideoWorkbenchApp:
         self._worker_log(f"  源视频: {best.get('source')}  时长约 {best.get('duration')}s")
         self._worker_log(
             f"  音频相似度 {best['audio_score']:.3f} / 视频相似度 {best['video_score']:.3f}")
+        _completion_beep()
         messagebox.showinfo(
             "指纹验证结果",
             "✅ 匹配到你的原创视频\n\n"
@@ -1160,6 +1195,7 @@ class VideoWorkbenchApp:
 
         if success_count <= 0:
             detail = "\n".join(failures[:8]) if failures else "未成功处理任何任务。"
+            _completion_beep()
             messagebox.showwarning("处理失败", detail)
             return
 
@@ -1170,9 +1206,11 @@ class VideoWorkbenchApp:
                 summary += f"\n... 另有 {len(failures) - 5} 个失败任务。"
 
         if self.auto_open_var.get() and last_output_dir and os.path.exists(last_output_dir):
+            _completion_beep()
             if messagebox.askyesno("完成", f"{summary}\n\n是否打开输出目录？"):
                 os.startfile(last_output_dir)
         else:
+            _completion_beep()
             messagebox.showinfo("完成", summary)
 
     def load_settings(self):
