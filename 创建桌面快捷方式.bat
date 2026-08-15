@@ -1,9 +1,5 @@
 @echo off
-rem Removed chcp 65001 / PYTHONUTF8=1: they conflict with the native
-rem GBK console codepage on Chinese Windows and garble Chinese output.
-rem This bat is pure ASCII; all Chinese comes from create_shortcut.py's
-rem print() calls, which Python renders correctly by default.
+rem 创建桌面快捷方式（无命令行窗口：pythonw 无控制台，窗口一闪即关）
 cd /d "%~dp0"
-python create_shortcut.py
-echo.
-pause
+start "" /b pythonw.exe create_shortcut.py
+exit

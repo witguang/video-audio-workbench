@@ -69,7 +69,7 @@ def check_and_fix_ico(current_dir):
 
 def create_desktop_shortcut():
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    
+
     # 格式自检与自动转换
     check_and_fix_ico(current_dir)
 
@@ -83,34 +83,53 @@ def create_desktop_shortcut():
     desktop_dir = get_real_desktop_path()
     shortcut_path = os.path.join(desktop_dir, "视频音频处理工作台.lnk")
     pythonw_path = sys.executable.replace("python.exe", "pythonw.exe")
+    if not os.path.exists(pythonw_path):
+        pythonw_path = sys.executable
 
-    # 这里的 "{icon_path},0" 是标准写法，表示使用该文件中的第一个图标索引，能有效减少空白白块的发生
-    vbs_content = (
-        f'Set WshShell = CreateObject("WScript.Shell")\n'
-        f'Set Shortcut = WshShell.CreateShortcut("{shortcut_path}")\n'
-        f'Shortcut.TargetPath = "{pythonw_path}"\n'
-        f'Shortcut.Arguments = Chr(34) & "{script_path}" & Chr(34)\n'
-        f'Shortcut.WorkingDirectory = "{current_dir}"\n'
-        f'Shortcut.IconLocation = "{icon_path},0"\n'
-        f'Shortcut.Save\n'
+    # 用 PowerShell 创建快捷方式（不用 VBS：VBS 临时文件按 GBK 写入、wscript 按
+    # 系统 ANSI 解码，中文路径（如 OneDrive 桌面重定向）会乱码导致 80070003。
+    # PowerShell 脚本用 UTF-8 BOM 写入，中文路径无歧义；-WindowStyle Hidden 无窗口。）
+    ps1_content = (
+        "$ws = New-Object -ComObject WScript.Shell\n"
+        "$s = $ws.CreateShortcut($env:SPH_SC_PATH)\n"
+        "$s.TargetPath = $env:SPH_SC_TARGET\n"
+        "$s.Arguments = $env:SPH_SC_ARGS\n"
+        "$s.WorkingDirectory = $env:SPH_SC_WORKDIR\n"
+        "$s.IconLocation = $env:SPH_SC_ICON + \",0\"\n"
+        "$s.Save()\n"
     )
 
-    temp_vbs = tempfile.NamedTemporaryFile(delete=False, suffix=".vbs", mode="w", encoding="gbk")
+    temp_ps1 = tempfile.NamedTemporaryFile(delete=False, suffix=".ps1",
+                                           mode="w", encoding="utf-8-sig")
     try:
-        temp_vbs.write(vbs_content)
-        temp_vbs.close()
+        temp_ps1.write(ps1_content)
+        temp_ps1.close()
 
-        result = subprocess.run(["wscript.exe", temp_vbs.name], capture_output=True)
-        if result.returncode == 0:
-            print(f"快捷方式已重新创建到桌面：{shortcut_path}")
+        env = dict(os.environ)
+        env["SPH_SC_PATH"] = shortcut_path
+        env["SPH_SC_TARGET"] = pythonw_path
+        env["SPH_SC_ARGS"] = f'"{script_path}"'
+        env["SPH_SC_WORKDIR"] = current_dir
+        env["SPH_SC_ICON"] = icon_path
+
+        CREATE_NO_WINDOW = 0x08000000  # 隐藏 PowerShell 自身窗口
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive",
+             "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden",
+             "-File", temp_ps1.name],
+            capture_output=True, env=env, creationflags=CREATE_NO_WINDOW)
+
+        if result.returncode == 0 and os.path.isfile(shortcut_path):
+            print(f"快捷方式已创建到桌面：{shortcut_path}")
         else:
-            print(f"创建快捷方式失败，Wscript 错误返回码：{result.returncode}")
+            err = (result.stderr or result.stdout or b"").decode("utf-8", "replace").strip()
+            print(f"创建快捷方式失败：{err or ('PowerShell 返回码 %s' % result.returncode)}")
     except Exception as e:
         print(f"运行过程中发生异常：{e}")
     finally:
-        if os.path.exists(temp_vbs.name):
+        if os.path.exists(temp_ps1.name):
             try:
-                os.remove(temp_vbs.name)
+                os.remove(temp_ps1.name)
             except OSError:
                 pass
 
