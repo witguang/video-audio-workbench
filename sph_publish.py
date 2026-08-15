@@ -506,40 +506,74 @@ def _fill_short_title(page, short_title: str, log_cb):
 
 
 def _select_collection(page, name: str, log_cb):
-    """添加到合集：点触发器打开下拉后，选项是按钮直接列出（无需搜索），点目标合集。
-    找不到目标则点下拉里第一个选项按钮（合集只有 Music 一个时它就是目标）。
-    找不到下拉/选项则跳过（非必填）。"""
+    """添加到合集：点触发器打开下拉后，选项直接列出（无需搜索），点目标合集。
+
+    真实结构（用户操作录制校准）：
+      - 触发器：<div class="post-album-display-wrap"><div class="display-text">选择合集</div>…
+        注意「添加到合集」只是 label（<div class="label">），点了不会打开下拉。
+      - 选项：<div class="option-item"><div class="item"><div class="name">Music</div>…
+    找不到目标则点下拉里第一个可见选项（合集只有 Music 一个时它就是目标）。
+    找不到下拉/选项则跳过（非必填）。
+    """
     if not name:
         return
     try:
         # 0) 先关掉可能出现的拦截弹窗，避免下拉触发器被盖住点击超时
         _dismiss_blocking_dialog(page, log_cb)
-        # 1) 打开合集下拉。触发器是 <div class="display-text">选择合集</div>（点击后才出现选项）；
-        #    注意「添加到合集」只是 label（<div class="label">），点了不会打开下拉。
+        # 1) 打开合集下拉：优先点 .post-album-display-wrap（真实触发器，含 display-text）
         opened = False
-        for trigger, exact in (("选择合集", True), ("选择合集", False),
-                               ("添加到合集", False), ("添加合集", False),
-                               ("未选择", False), ("合集", False)):
-            try:
-                t = page.get_by_text(trigger, exact=exact).first
-                if t.is_visible(timeout=1_500):
-                    t.click()
-                    opened = True
-                    if log_cb:
-                        log_cb(f"已点击合集下拉触发器「{trigger}」。")
-                    break
-            except Exception:
-                continue
+        try:
+            wrap = page.locator(".post-album-display-wrap").first
+            if wrap.is_visible(timeout=2_000):
+                wrap.click()
+                opened = True
+                if log_cb:
+                    log_cb("已点击合集下拉触发器（post-album-display-wrap）。")
+        except Exception:
+            pass
+        if not opened:
+            # 回退：按文字找触发器
+            for trigger, exact in (("选择合集", True), ("选择合集", False),
+                                   ("添加到合集", False), ("添加合集", False),
+                                   ("未选择", False), ("合集", False)):
+                try:
+                    t = page.get_by_text(trigger, exact=exact).first
+                    if t.is_visible(timeout=1_500):
+                        t.click()
+                        opened = True
+                        if log_cb:
+                            log_cb(f"已点击合集下拉触发器「{trigger}」。")
+                        break
+                except Exception:
+                    continue
         if not opened:
             if log_cb:
                 log_cb("未找到合集下拉触发器，跳过。")
             return
         _active_wait(page, 1_500, log_cb)  # 等下拉选项渲染（保持活跃+关拦截弹窗）
 
-        # 2) 点选目标合集（不搜索——下拉选项是按钮，直接列出；
-        #    遍历所有匹配、点第一个可见的，避免 .first 命中隐藏重复节点）
+        # 2) 点选目标合集：优先 .option-item 下的 .item 精确匹配 name
+        #    （真实结构：用户实际点击的是 <div class="item"><div class="name">Music</div>）
         _dismiss_blocking_dialog(page, log_cb)  # 点击前再关一次，防止弹窗盖住选项
-        clicked = _click_first_visible(page, page.get_by_text(name, exact=False))
+        clicked = False
+        for opt in page.locator(".option-item").all():
+            try:
+                if not opt.is_visible(timeout=400):
+                    continue
+                nm = opt.locator(".name").first
+                if nm.is_visible(timeout=300) and nm.inner_text().strip() == name:
+                    item = opt.locator(".item").first
+                    if item.is_visible(timeout=300):
+                        item.click()  # 与用户手动操作一致（点 .item）
+                    else:
+                        opt.click()
+                    clicked = True
+                    break
+            except Exception:
+                continue
+        # 2.5) 回退：按文字找（遍历点第一个可见的，避免 .first 命中隐藏重复节点）
+        if not clicked:
+            clicked = _click_first_visible(page, page.get_by_text(name, exact=False))
         # 3) 兜底：点下拉里第一个可见选项按钮
         if not clicked:
             clicked = _click_first_dropdown_option(page)
@@ -558,46 +592,95 @@ def _select_collection(page, name: str, log_cb):
 def _select_location(page, log_cb):
     """位置：规格为「不显示位置」。
 
-    位置框是下拉控件：点开前的可见触发器是「位置」行里的 .display-text（或 label 本身），
-    展开后第一行是「搜索附近位置」搜索框（是 input，不在选项选择器内，不会被点到），
-    随后是选项按钮，「不显示位置」就是第一个选项按钮。
+    真实结构（用户操作录制校准）：
+      - 触发器：<div class="post-position-wrap"><div class="position-display-wrap">
+        <div class="place"><span class="location-name">上海市</span>…（显示当前值）
+      - 展开后选项：<div class="location-item"><div class="location-item-info">
+        <div class="name">不显示位置</div>
     选完会读回显示值核实真正选中了什么；误选会自动重试。
+
+    ⚠️ 下拉是否真的打开，以「搜索附近位置」输入框可见为准——没打开就绝不
+    用全页面兜底选择器（那会点到页面其他区域的 option/item，把状态搞乱，
+    导致后续「合集/活动/定时发表/声明原创」全部失效——用户实测反馈）。
     """
     try:
         # 0) 先关掉可能出现的拦截弹窗，避免位置行被盖住点击超时
         _dismiss_blocking_dialog(page, log_cb)
-        # 1) 打开位置下拉：点「位置」label 所在行里的 .display-text；没有则点 label 本身
-        label = page.locator("div.label", has_text="位置").first
-        if not label.is_visible(timeout=3_000):
-            if log_cb:
-                log_cb("未找到「位置」行（跳过）。")
-            return
-        row = label.locator("xpath=..")
-        display = row.locator(".display-text")
-
-        def _read_display():
-            try:
-                return display.first.inner_text().strip()
-            except Exception:
-                return ""
-
+        # 1) 打开位置下拉：优先点 .post-position-wrap（真实触发器，显示当前值如「上海市」）。
+        opened = False
         try:
-            trigger = display.first
-            if trigger.is_visible(timeout=2_000):
-                trigger.click()
-            else:
-                label.click()
+            wrap = page.locator(".post-position-wrap").first
+            if wrap.is_visible(timeout=2_000):
+                wrap.click()
+                opened = True
         except Exception:
-            label.click()
-        _active_wait(page, 1_500, log_cb)  # 等下拉选项渲染（保持活跃+关拦截弹窗）
+            pass
+        if not opened:
+            # 回退：点「位置」label 所在行里的 .display-text；没有则点 label 本身。
+            # 精确匹配 label 文本（exact），避免子串匹配到其他含「位置」的行。
+            try:
+                label = page.locator("div.label", has_text=re.compile(r"^\s*位置\s*$")).first
+                if not label.is_visible(timeout=2_000):
+                    if log_cb:
+                        log_cb("未找到「位置」行（跳过）。")
+                    return
+                row = label.locator("xpath=..")
+                display = row.locator(".display-text")
+                try:
+                    trigger = display.first
+                    if trigger.is_visible(timeout=1_500):
+                        trigger.click()
+                    else:
+                        label.click()
+                except Exception:
+                    label.click()
+                opened = True
+            except Exception:
+                if log_cb:
+                    log_cb("未找到「位置」行（跳过）。")
+                return
+        _active_wait(page, 1_000, log_cb)  # 等下拉展开（保持活跃+关拦截弹窗）
 
-        # 2) 优先精确匹配「不显示位置」（遍历点第一个可见的，避免 .first 命中隐藏重复节点）
+        # 1.5) 确认下拉真的展开了：「搜索附近位置」搜索框可见。未展开则收起并跳过，
+        #      绝不走全页面兜底选择器（会误点其他区域，中断后续所有字段）。
+        search = page.locator("input[placeholder*='搜索附近位置']").first
+        opened_ok = False
+        try:
+            opened_ok = search.is_visible(timeout=2_000)
+        except Exception:
+            pass
+        if not opened_ok:
+            try:
+                page.keyboard.press("Escape")  # 收起可能半开的下拉，避免遮挡后续字段
+                _active_wait(page, 300, log_cb)
+            except Exception:
+                pass
+            if log_cb:
+                log_cb("位置：下拉未展开（跳过，保持默认）。")
+            return
+
+        # 2) 下拉已确认打开：优先点 .location-item 下 name 为「不显示位置」的选项
         _dismiss_blocking_dialog(page, log_cb)  # 点击前再关一次，防止弹窗盖住选项
-        clicked = _click_first_visible(page, page.get_by_text("不显示位置", exact=False))
+        clicked = False
+        for item in page.locator(".location-item").all():
+            try:
+                if not item.is_visible(timeout=400):
+                    continue
+                nm = item.locator(".name").first
+                if nm.is_visible(timeout=300) and "不显示位置" in nm.inner_text():
+                    item.click()
+                    clicked = True
+                    break
+            except Exception:
+                continue
+        # 2.5) 回退：按文字精确匹配「不显示位置」（遍历点第一个可见的）
         if not clicked:
             clicked = _click_first_visible(page, page.get_by_text("不显示位置", exact=True))
-        # 3) 兜底：点下拉里第一个可见选项按钮。搜索框是 input 不在选项选择器里，
-        #    所以第一项就是「不显示位置」，不再跳过第一项（上次 start_index=1 点到了第二项=别的城市）
+        if not clicked:
+            clicked = _click_first_visible(page, page.get_by_text("不显示位置", exact=False))
+        # 3) 兜底：点下拉里第一个可见选项按钮（此时下拉已确认打开，作用域安全）。
+        #    搜索框是 input 不在选项选择器里，所以第一项就是「不显示位置」，
+        #    不再跳过第一项（上次 start_index=1 点到了第二项=别的城市）
         if not clicked:
             clicked = _click_first_dropdown_option(page, start_index=0)
         _active_wait(page, 500, log_cb)
@@ -608,30 +691,55 @@ def _select_location(page, log_cb):
             return
 
         # 4) 读回显示值核实：确认真正选中了「不显示位置」
-        actual = _read_display()
-        if "不显示位置" in actual:
+        #    （真实结构：显示值在 .position-display-wrap .location-name；
+        #     选中「不显示位置」后该值可能为空——不显示位置=无位置，空值视为成功）
+        actual = ""
+        try:
+            actual = page.locator(".position-display-wrap .location-name").first.inner_text().strip()
+        except Exception:
+            pass
+        if "不显示位置" in actual or actual == "":
             if log_cb:
-                log_cb(f"位置：已选择「不显示位置」（显示值：{actual}）。")
+                log_cb(f"位置：已选择「不显示位置」（显示值：{actual or '空'}）。")
             return
 
-        # 误选了别的：重新打开下拉，重试精确匹配
+        # 误选了别的：重新打开下拉，重试精确匹配（同样先确认下拉展开）
         if log_cb:
             log_cb(f"位置：误选了「{actual}」，正在重试选择「不显示位置」…")
         try:
-            trigger = display.first
-            if trigger.is_visible(timeout=2_000):
-                trigger.click()
-                _active_wait(page, 800, log_cb)
+            try:
+                wrap = page.locator(".post-position-wrap").first
+                if wrap.is_visible(timeout=1_500):
+                    wrap.click()
+                    _active_wait(page, 800, log_cb)
+            except Exception:
+                pass
+            try:
+                reopened = search.is_visible(timeout=2_000)
+            except Exception:
+                reopened = False
+            if reopened:
                 _dismiss_blocking_dialog(page, log_cb)
-                _click_first_visible(page, page.get_by_text("不显示位置", exact=False))
+                for item in page.locator(".location-item").all():
+                    try:
+                        if item.is_visible(timeout=400):
+                            nm = item.locator(".name").first
+                            if nm.is_visible(timeout=300) and "不显示位置" in nm.inner_text():
+                                item.click()
+                                break
+                    except Exception:
+                        continue
                 _active_wait(page, 500, log_cb)
-                actual = _read_display()
-                if "不显示位置" in actual:
-                    if log_cb:
-                        log_cb(f"位置：重试成功，已选择「不显示位置」（显示值：{actual}）。")
-                else:
-                    if log_cb:
-                        log_cb(f"位置：重试后显示仍为「{actual}」，请手动在浏览器中确认。")
+            try:
+                actual = page.locator(".position-display-wrap .location-name").first.inner_text().strip()
+            except Exception:
+                pass
+            if "不显示位置" in actual or actual == "":
+                if log_cb:
+                    log_cb(f"位置：重试成功，已选择「不显示位置」（显示值：{actual or '空'}）。")
+            else:
+                if log_cb:
+                    log_cb(f"位置：重试后显示仍为「{actual}」，请手动在浏览器中确认。")
         except Exception:
             pass
     except Exception as exc:
@@ -639,38 +747,168 @@ def _select_location(page, log_cb):
             log_cb(f"位置设置失败（跳过）：{exc}")
 
 
-def _declare_original(page, log_cb):
-    """声明原创（用户反馈：是个选择框，点击之后才会出现弹窗）。
+def _keep_activity_default(page, log_cb):
+    """活动：规格为保持默认「不参加活动」。
 
-    流程：点「声明后，作品将展示原创标记，有机会获得广告收入。」选择框 → 弹窗出现
-    → 勾选「我已阅读并…」→ 点弹窗内「声明原创」确认。
+    活动是搜索下拉（placeholder「搜索活动」），一旦点开、点到任何活动选项就
+    算参加该活动，无法撤销选择，因此**绝不点开**。默认不参加即可。
+    """
+    if log_cb:
+        log_cb("活动：保持默认不参加。")
+
+
+def _ensure_immediate_publish(page, log_cb):
+    """定时发表：规格为「不定时」（立即发表）。
+
+    页面提供「不定时/定时」radio 单选（weui-desktop-form__radio）。默认即
+    「不定时」；若页面状态异常选中了「定时」，改回「不定时」。找不到则跳过
+    （默认即不定时）。
+    """
+    try:
+        label_now = page.get_by_text("不定时", exact=True).first
+        if not label_now.is_visible(timeout=2_000):
+            if log_cb:
+                log_cb("定时发表：未找到「不定时」选项（保持默认）。")
+            return
+        radio = label_now.locator("input.weui-desktop-form__radio").first
+        try:
+            if radio.is_checked():
+                if log_cb:
+                    log_cb("定时发表：保持「不定时」（立即发表）。")
+                return
+        except Exception:
+            pass
+        label_now.click()  # label 点击会选中其 radio
+        _active_wait(page, 400, log_cb)
+        if log_cb:
+            log_cb("定时发表：已选择「不定时」（立即发表）。")
+    except Exception as exc:
+        if log_cb:
+            log_cb(f"定时发表设置失败（跳过）：{exc}")
+
+
+def _select_no_mark(page, log_cb):
+    """视频标注：规格为「无需标注」（用户操作录制校准）。
+
+    真实结构（用户录制）：
+      - 触发器：<div class="mark-tag-select"><div class="select-display">
+        <span class="select-placeholder">选择视频标注</span>…（用户实际点击 mark-tag-select）
+      - 选项：<div class="option-main">无需标注</div>
+    找不到则跳过（保持默认）。
+    """
+    try:
+        _dismiss_blocking_dialog(page, log_cb)
+        # 触发器：优先 .mark-tag-select（用户实际点击的容器，含 select-placeholder）；
+        # 遍历找可见且含「选择视频标注」文本的
+        ph = None
+        for el in page.locator(".mark-tag-select").all():
+            try:
+                if el.is_visible(timeout=300) and "选择视频标注" in el.inner_text():
+                    ph = el
+                    break
+            except Exception:
+                continue
+        if ph is None:
+            # 回退 1：.select-placeholder（span 本身）
+            for el in page.locator(".select-placeholder").all():
+                try:
+                    if el.is_visible(timeout=300) and "选择视频标注" in el.inner_text():
+                        ph = el
+                        break
+                except Exception:
+                    continue
+        if ph is None:
+            # 回退 2：按文字找
+            for el in page.get_by_text("选择视频标注", exact=False).all():
+                try:
+                    if el.is_visible(timeout=300):
+                        ph = el
+                        break
+                except Exception:
+                    continue
+        if ph is None:
+            if log_cb:
+                log_cb("未找到「视频标注」触发器（跳过）。")
+            return
+        ph.click()
+        _active_wait(page, 1_000, log_cb)  # 等选项渲染
+        clicked = False
+        for opt in page.locator(".option-main").all():
+            try:
+                if opt.is_visible(timeout=400) and "无需标注" in opt.inner_text():
+                    opt.click()
+                    clicked = True
+                    break
+            except Exception:
+                continue
+        if not clicked:
+            clicked = _click_first_visible(page, page.get_by_text("无需标注", exact=False))
+        _active_wait(page, 500, log_cb)
+        if clicked:
+            if log_cb:
+                log_cb("视频标注：已选择「无需标注」。")
+        else:
+            if log_cb:
+                log_cb("视频标注：未找到「无需标注」选项（跳过）。")
+    except Exception as exc:
+        if log_cb:
+            log_cb(f"视频标注设置失败（跳过）：{exc}")
+
+
+def _declare_original(page, log_cb):
+    """声明原创（用户操作录制校准）。
+
+    真实流程：点「声明后，作品将展示原创标记，有机会获得广告收入。」勾选框 →
+    弹窗出现 → 弹窗内勾选「我已阅读并…」→ 点弹窗内「声明原创」确认按钮。
+
+    ⚠️ 幂等关键：若勾选框**已勾选**（页面可能记住上次状态，ant-checkbox-wrapper-checked），
+    绝不能再次点击——那会把已勾选点成取消勾选，弹窗不出现、后续全乱（用户实测根因）。
+    已勾选时直接跳过勾选，只做弹窗确认。
     """
     try:
         # 0) 先关掉可能出现的拦截弹窗（如草稿确认框），否则勾选框被盖住会点击超时
         _dismiss_blocking_dialog(page, log_cb)
-        # 1) 勾选声明原创选择框（外层 ant-checkbox-wrapper，文案「声明后，作品将展示原创标记…」；
-        #    点击后弹出声明原创窗口，disabled 的「声明原创」按钮随之启用）
+        # 1) 定位声明原创勾选框（外层 ant-checkbox-wrapper，文案「声明后，作品将展示原创标记…」）
         try:
             cb = page.locator("label.ant-checkbox-wrapper", has_text="声明后").first
             if not cb.is_visible(timeout=3_000):
                 if log_cb:
-                    log_cb("未找到「声明原创」选择框（跳过）。")
+                    log_cb("未找到「声明原创」勾选框（跳过）。")
                 return
-            cb.click(timeout=5_000)
+            # 幂等：已勾选则不点（点了会取消勾选）
+            already_checked = False
+            try:
+                already_checked = cb.locator("input.ant-checkbox-input").first.is_checked()
+            except Exception:
+                pass
+            if already_checked:
+                if log_cb:
+                    log_cb("声明原创：勾选框已勾选，声明已生效（无需操作）。")
+                # 已勾选 = 声明原创已完成（页面记住上次状态），直接返回，
+                # 不要再找「我已阅读并」/确认按钮——弹窗只在未勾选点击后才出现
+                return
+            else:
+                cb.click(timeout=5_000)  # 点击后弹出声明原创窗口
+                _active_wait(page, 1_500, log_cb)  # 等声明弹窗渲染（保持活跃+关拦截弹窗）
         except Exception as exc:
             if log_cb:
-                log_cb(f"「声明原创」选择框点击失败（可能未启用）：{exc}")
+                log_cb(f"「声明原创」勾选框点击失败（可能未启用）：{exc}")
             return
-        _active_wait(page, 1_500, log_cb)  # 等声明弹窗渲染（保持活跃+关拦截弹窗）
 
-        # 2) 弹窗内勾选「我已阅读并…」；找不到则回退勾选任意 ant-checkbox
-        checked = False
+        # 2) 弹窗内勾选「我已阅读并…」；找不到则回退勾选弹窗内任意未勾选 ant-checkbox
+        checked = already_checked
         try:
             agree = page.locator("label.ant-checkbox-wrapper", has_text="我已阅读并").first
             if agree.is_visible(timeout=3_000):
-                agree.click()
-                _active_wait(page, 500, log_cb)
-                checked = True
+                try:
+                    if not agree.locator("input.ant-checkbox-input").first.is_checked():
+                        agree.click()
+                        _active_wait(page, 500, log_cb)
+                    checked = True
+                except Exception:
+                    agree.click()
+                    _active_wait(page, 500, log_cb)
+                    checked = True
         except Exception:
             pass
         if not checked:
@@ -684,19 +922,42 @@ def _declare_original(page, log_cb):
                 except Exception:
                     continue
 
-        # 3) 确认：弹窗内「声明原创」按钮（或 确定/确认/同意）
+        # 3) 确认：弹窗内「声明原创」按钮（或 确定/确认/同意）。
+        #    优先在弹窗容器内找，避免点到表单外部的同名按钮
         _dismiss_blocking_dialog(page, log_cb)  # 点击前再关一次，防止「将此次编辑保留」盖住确认按钮
-        for label in ("声明原创", "确定", "确认", "同意"):
+        btn = None
+        for dlg in page.locator("[class*='weui-desktop-dialog'], .common-dialog, [role='dialog'], [class*='modal']").all():
             try:
-                b = page.get_by_role("button", name=label).last
-                if b.is_visible(timeout=1_500):
-                    b.click()
-                    _active_wait(page, 500, log_cb)
-                    if log_cb:
-                        log_cb(f"已声明原创（{label}确认）。")
-                    return
+                if not dlg.is_visible(timeout=300):
+                    continue
+                for label in ("声明原创", "确定", "确认", "同意"):
+                    try:
+                        b = dlg.get_by_role("button", name=label).last
+                        if b.is_visible(timeout=800):
+                            btn = b
+                            break
+                    except Exception:
+                        continue
+                if btn is not None:
+                    break
             except Exception:
                 continue
+        if btn is None:
+            # 回退：全页面找（兼容弹窗容器选择器失效）
+            for label in ("声明原创", "确定", "确认", "同意"):
+                try:
+                    b = page.get_by_role("button", name=label).last
+                    if b.is_visible(timeout=1_500):
+                        btn = b
+                        break
+                except Exception:
+                    continue
+        if btn is not None:
+            btn.click()
+            _active_wait(page, 500, log_cb)
+            if log_cb:
+                log_cb("已声明原创（弹窗确认）。")
+            return
         if log_cb:
             log_cb("声明原创：弹窗已打开但未找到确认按钮（跳过确认）。")
     except Exception as exc:
@@ -705,17 +966,25 @@ def _declare_original(page, log_cb):
 
 
 def _wait_upload_done(page, log_cb, timeout_ms: int = _UPLOAD_TIMEOUT_MS) -> bool:
-    """等待上传完成（视频预览出现）。期间每 ~2s 轻移鼠标保持页面「活跃」，避免页面因
-    空闲弹出「将此次编辑保留」弹窗；若弹窗仍出现，用 Escape 关闭（留在当前页，不点
-    「保存」——那会跳转草稿箱，导致合集/声明原创来不及填）。
+    """等待上传完成（合集/声明原创等字段渲染出来）。
 
-    返回是否在超时内上传完成。单独抽出是因为：合集/声明原创字段、以及 auto 模式的
-    「发表」按钮都要求上传完成才可用。
+    真实页面（用户操作录制校准）：上传完成前视频预览的 <video> 元素不可见
+    （封面用图片/div 渲染），等 video 永远超时——实测「上传未在超时内完成，
+    已跳过合集/声明原创」根因。改为等「声明原创」勾选框渲染（它在上传完成后
+    才出现，正是后续要操作的字段）。
+
+    期间每 ~1s 轻移鼠标保持页面「活跃」，避免页面因空闲弹出「将此次编辑保留」
+    弹窗；若弹窗仍出现，用 Escape 关闭（留在当前页，不点「保存」——那会跳转
+    草稿箱，导致合集/声明原创来不及填）。
+
+    返回是否在超时内上传完成。单独抽出是因为：合集/声明原创字段、以及 auto
+    模式的「发表」按钮都要求上传完成才可用。
     """
     deadline = time.time() + timeout_ms / 1000.0
     while time.time() < deadline:
         try:
-            if page.locator(SEL_VIDEO_PREVIEW).first.is_visible(timeout=800):
+            # 声明原创勾选框 = 上传完成信号（video 预览不可见，不能用 SEL_VIDEO_PREVIEW）
+            if page.locator("label.ant-checkbox-wrapper", has_text="声明后").first.is_visible(timeout=800):
                 return True
         except Exception:
             pass
@@ -851,9 +1120,15 @@ def publish(video_path: str,
                 _active_wait(page, 500, log_cb)
                 # 添加到合集
                 _select_collection(page, collection, log_cb)
+                # 活动（规格：保持默认不参加——绝不点开活动下拉）
+                _keep_activity_default(page, log_cb)
+                # 定时发表（规格：不定时/立即发表）
+                _ensure_immediate_publish(page, log_cb)
                 # 声明原创（含弹窗确认）
                 if declare_original:
                     _declare_original(page, log_cb)
+                # 视频标注（规格：无需标注）
+                _select_no_mark(page, log_cb)
             else:
                 if headless:
                     raise SphError(
@@ -861,7 +1136,7 @@ def publish(video_path: str,
                 if log_cb:
                     log_cb("上传未在超时内完成，已跳过「添加到合集/声明原创」（可在浏览器手动补充）。")
 
-            # 链接 / 活动 / 定时发表 / 视频标注：按用户规格保持默认不操作
+            # 链接 / 视频标注：按用户规格保持默认不操作（活动/定时发表已在上方处理）
 
             _save_state(context, cookie_path, log_cb)
 
@@ -930,7 +1205,10 @@ def dump_publish_page(cookie_path: str = DEFAULT_COOKIE_FILE,
                 if log_cb:
                     log_cb("视频上传中，请等待转码完成…")
                 try:
-                    page.wait_for_selector(SEL_VIDEO_PREVIEW, timeout=_UPLOAD_TIMEOUT_MS)
+                    # 上传完成信号：声明原创勾选框渲染（video 预览不可见，不能用 SEL_VIDEO_PREVIEW）
+                    page.wait_for_selector(
+                        "label.ant-checkbox-wrapper:has-text('声明后')",
+                        timeout=_UPLOAD_TIMEOUT_MS)
                 except Exception:
                     page.wait_for_timeout(10_000)
                 page.wait_for_timeout(2_000)
